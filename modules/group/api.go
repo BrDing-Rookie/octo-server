@@ -1177,6 +1177,17 @@ func (g *Group) addMembersTx(members []string, groupNo string, operator, operato
 		return nil, errors.New("调用IM的订阅接口失败！")
 	}
 
+	// 检查新增成员中是否有Bot用户，推送 bot_joined_group 事件
+	botMembers := make([]*user.Model, 0)
+	for _, realMember := range realMemberModels {
+		if realMember.Robot == 1 {
+			botMembers = append(botMembers, realMember)
+		}
+	}
+	if len(botMembers) > 0 {
+		go g.notifyBotJoinedGroup(botMembers, groupNo, operator, operatorName)
+	}
+
 	return func() {
 		// 提交事件
 		g.ctx.EventCommit(eventID)
@@ -1216,6 +1227,31 @@ func (g *Group) addMembers(members []string, groupNo string, operator, operatorN
 	}
 
 	return nil
+}
+
+// notifyBotJoinedGroup 向Bot的事件队列推送 bot_joined_group 事件
+func (g *Group) notifyBotJoinedGroup(botMembers []*user.Model, groupNo, operator, operatorName string) {
+	for _, botMember := range botMembers {
+		robotID := botMember.UID
+		seq := g.ctx.GenSeq(fmt.Sprintf("%s%s", common.RobotEventSeqKey, robotID))
+		eventData := map[string]interface{}{
+			"event_id":   seq,
+			"event_type": "bot_joined_group",
+			"event_data": map[string]interface{}{
+				"group_no":      groupNo,
+				"operator":      operator,
+				"operator_name": operatorName,
+			},
+			"expire": time.Now().Add(time.Hour * 24).Unix(),
+		}
+		key := fmt.Sprintf("robotEvent:%s", robotID)
+		err := g.ctx.GetRedisConn().ZAdd(key, float64(seq), util.ToJson(eventData))
+		if err != nil {
+			g.Error("推送bot_joined_group事件失败！", zap.Error(err), zap.String("robotID", robotID), zap.String("groupNo", groupNo))
+			continue
+		}
+		g.Info("已推送bot_joined_group事件", zap.String("robotID", robotID), zap.String("groupNo", groupNo))
+	}
 }
 
 // 添加管理员

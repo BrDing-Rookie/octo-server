@@ -69,8 +69,9 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 				mentionUIDsValue := mentionValue.Get("uids")
 				if mentionValue.Exists() && mentionUIDsValue.Exists() {
 					uidsValues := mentionUIDsValue.Array()
-					if len(uidsValues) == 1 { // 如果有多个@则 不支持robot功能
-						uid := uidsValues[0].String()
+					// 遍历所有被@的UID，找到其中的机器人
+					for _, uidValue := range uidsValues {
+						uid := uidValue.String()
 						exist, err := rb.existRobot(uid)
 						if err != nil {
 							rb.Error("查询有效robotID失败！", zap.Error(err))
@@ -78,6 +79,7 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 						}
 						if exist {
 							robotID = uid
+							break
 						}
 					}
 				}
@@ -86,8 +88,9 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 					content := payloadValue.Get("content").String()
 					if strings.Contains(content, "@") {
 						mentionUsernames := rb.mentionRegexp.FindAllString(content, -1)
-						if len(mentionUsernames) == 1 { // 机器人单独@才会触发
-							robotUsername := strings.TrimSpace(mentionUsernames[0][1:])
+						// 遍历所有@提及，找到其中的机器人
+						for _, mentionUsername := range mentionUsernames {
+							robotUsername := strings.TrimSpace(mentionUsername[1:])
 							exist, err := rb.existRobot(robotUsername)
 							if err != nil {
 								rb.Error("查询有效robotID失败！", zap.Error(err))
@@ -95,6 +98,7 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 							}
 							if exist {
 								robotID = robotUsername
+								break
 							}
 						}
 					}
@@ -104,7 +108,29 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 		if len(robotID) > 0 {
 			rb.Info("投递消息到机器人事件队列", zap.String("robotID", robotID), zap.String("fromUID", message.FromUID), zap.Int64("messageID", message.MessageID))
 			go rb.saveRobotMessage(message, robotID)
+
+			// Bot自动已读：清除会话未读计数
+			go rb.autoReadForBot(message, robotID)
 		}
+	}
+}
+
+// autoReadForBot 为Bot自动标记消息已读
+func (rb *Robot) autoReadForBot(message *config.MessageResp, robotID string) {
+	channelID := message.ChannelID
+	channelType := message.ChannelType
+	if channelType == common.ChannelTypePerson.Uint8() {
+		// DM场景：对Bot而言，会话的channelID是发送者的UID
+		channelID = message.FromUID
+	}
+	err := rb.ctx.IMClearConversationUnread(config.ClearConversationUnreadReq{
+		UID:         robotID,
+		ChannelID:   channelID,
+		ChannelType: channelType,
+		Unread:      0,
+	})
+	if err != nil {
+		rb.Warn("Bot自动已读失败", zap.Error(err), zap.String("robotID", robotID), zap.String("channelID", channelID))
 	}
 }
 

@@ -579,9 +579,11 @@ func (bf *BotFather) getEventsResult(robotID string, eventID int64, limit int64)
 	results := make([]*eventResp, 0)
 	if len(robotEventJsons) > 0 {
 		type robotEvent struct {
-			EventID int64               `json:"event_id,omitempty"`
-			Message *config.MessageResp `json:"message,omitempty"`
-			Expire  int64               `json:"expire,omitempty"`
+			EventID   int64                  `json:"event_id,omitempty"`
+			Message   *config.MessageResp    `json:"message,omitempty"`
+			EventType string                 `json:"event_type,omitempty"`
+			EventData map[string]interface{} `json:"event_data,omitempty"`
+			Expire    int64                  `json:"expire,omitempty"`
 		}
 
 		events := make([]*robotEvent, 0)
@@ -605,10 +607,10 @@ func (bf *BotFather) getEventsResult(robotID string, eventID int64, limit int64)
 			}
 			if ev.Message != nil {
 				resp.Message = &messageResp{
-					MessageID:   ev.Message.MessageID,
-					MessageSeq:  ev.Message.MessageSeq,
-					FromUID:     ev.Message.FromUID,
-					Timestamp:   ev.Message.Timestamp,
+					MessageID:  ev.Message.MessageID,
+					MessageSeq: ev.Message.MessageSeq,
+					FromUID:    ev.Message.FromUID,
+					Timestamp:  ev.Message.Timestamp,
 				}
 				if ev.Message.ChannelType != common.ChannelTypePerson.Uint8() {
 					resp.Message.ChannelID = ev.Message.ChannelID
@@ -618,6 +620,10 @@ func (bf *BotFather) getEventsResult(robotID string, eventID int64, limit int64)
 				if err := util.ReadJsonByByte(ev.Message.Payload, &payloadMap); err == nil {
 					resp.Message.Payload = payloadMap
 				}
+			}
+			if ev.EventType != "" {
+				resp.EventType = ev.EventType
+				resp.EventData = ev.EventData
 			}
 			results = append(results, resp)
 		}
@@ -704,8 +710,10 @@ func (bf *BotFather) heartbeat(c *wkhttp.Context) {
 // ========== 响应模型 ==========
 
 type eventResp struct {
-	EventID int64        `json:"event_id"`
-	Message *messageResp `json:"message,omitempty"`
+	EventID   int64                  `json:"event_id"`
+	Message   *messageResp           `json:"message,omitempty"`
+	EventType string                 `json:"event_type,omitempty"` // 自定义事件类型（如 bot_joined_group）
+	EventData map[string]interface{} `json:"event_data,omitempty"` // 自定义事件数据
 }
 
 type messageResp struct {

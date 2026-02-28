@@ -749,9 +749,11 @@ type menuResp struct {
 }
 
 type robotEventResp struct {
-	EventID     int64                   `json:"event_id,omitempty"` // 更新ID
-	Message     *simpleRobotMessageResp `json:"message,omitempty"`  // 消息对象
-	InlineQuery *InlineQuery            `json:"inline_query"`       // 查询
+	EventID     int64                   `json:"event_id,omitempty"`   // 更新ID
+	Message     *simpleRobotMessageResp `json:"message,omitempty"`    // 消息对象
+	InlineQuery *InlineQuery            `json:"inline_query"`         // 查询
+	EventType   string                  `json:"event_type,omitempty"` // 自定义事件类型
+	EventData   map[string]interface{}  `json:"event_data,omitempty"` // 自定义事件数据
 }
 
 func (s *robotEventResp) from(resp *robotEvent) {
@@ -764,7 +766,10 @@ func (s *robotEventResp) from(resp *robotEvent) {
 	if resp.InlineQuery != nil {
 		s.InlineQuery = resp.InlineQuery
 	}
-
+	if resp.EventType != "" {
+		s.EventType = resp.EventType
+		s.EventData = resp.EventData
+	}
 }
 
 type simpleRobotMessageResp struct {
