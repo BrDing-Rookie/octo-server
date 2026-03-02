@@ -184,3 +184,13 @@ type robot struct {
 	BotCommands  string // 机器人命令列表JSON
 	db.BaseModel
 }
+
+// queryRobotUIDsInGroup 查询群内的机器人成员UID列表
+func (d *robotDB) queryRobotUIDsInGroup(groupNo string) ([]string, error) {
+	var uids []string
+	_, err := d.session.SelectBySql(
+		"SELECT gm.uid FROM group_member gm INNER JOIN robot r ON gm.uid = r.robot_id WHERE gm.group_no = ? AND gm.is_deleted = 0 AND r.status = 1",
+		groupNo,
+	).Load(&uids)
+	return uids, err
+}
