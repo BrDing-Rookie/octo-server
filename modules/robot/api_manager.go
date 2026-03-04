@@ -186,7 +186,7 @@ type robotMenu struct {
 
 // 机器人列表（分页）
 func (m *Manager) robotList(c *wkhttp.Context) {
-	err := c.CheckLoginRole()
+	err := c.CheckLoginRoleIsSuperAdmin()
 	if err != nil {
 		c.ResponseError(err)
 		return
