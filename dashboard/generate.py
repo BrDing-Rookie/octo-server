@@ -12,8 +12,8 @@ OUTPUT_DIR = "/var/www/html/dashboard"
 # 排除 Bot、系统账号、测试用户
 EXCLUDE_UIDS = "uid NOT IN (SELECT robot_id FROM robot) AND uid NOT IN ('u_10000', 'botfather', 'fileHelper') AND name NOT LIKE '%测试%' AND username NOT LIKE 'test%' AND username NOT LIKE 'demo%'"
 
-# 排除测试群组
-EXCLUDE_GROUPS = "name NOT LIKE '%测试%' AND name NOT LIKE '%test%' AND creator NOT IN (SELECT uid FROM user WHERE name LIKE '%测试%' OR username LIKE 'test%')"
+# 排除 E2E 测试创建的群组（创建者为测试账号或已删除的测试用户）
+EXCLUDE_GROUPS = "creator NOT IN ('aee7e220529141bfa5e0ac4a3a3dd40d', 'd776fe3a8fbc4a6e8d8627eb2d829042')"
 
 def query(sql):
     # Write SQL to temp file to avoid shell escaping issues
