@@ -309,6 +309,7 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 		c.ResponseError(errors.New("读取文件失败！"))
 		return
 	}
+	defer file.Close()
 
 	isCreator, err := g.db.QueryIsGroupCreator(groupNo, loginUID)
 	if err != nil {
@@ -326,7 +327,6 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 		_, err := io.Copy(w, file)
 		return err
 	})
-	defer file.Close()
 	if err != nil {
 		g.Error("上传文件失败！", zap.Error(err))
 		c.ResponseError(errors.New("上传文件失败！"))
