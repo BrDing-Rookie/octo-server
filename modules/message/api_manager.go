@@ -740,7 +740,7 @@ func (m *Manager) sendMessageBatch(uids [][]string, content string) error {
 			m.Error("发送消息错误", zap.Error(err))
 			return errors.New("发送消息错误")
 		}
-		time.Sleep(time.Second)
+		time.Sleep(time.Second) // 批量发送限流，避免消息风暴
 	}
 	return nil
 }

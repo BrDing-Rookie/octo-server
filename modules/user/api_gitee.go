@@ -234,7 +234,7 @@ func (u *User) giteeOAuth(c *wkhttp.Context) {
 		c.ResponseError(errors.New("redis set error"))
 		return
 	}
-	time.Sleep(time.Second * 3)      // 这里等待2秒，让前端有足够的时间跳转到登录成功页面。
+	// 认证结果已存入 Redis，前端通过轮询获取，无需延迟响应
 	c.String(http.StatusOK, "登录失败！") // 如果一切正常，理论上是看不到这个返回结果的
 }
 

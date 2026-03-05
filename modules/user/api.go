@@ -1166,7 +1166,8 @@ func (u *User) sentWelcomeMsg(publicIP, uid string) {
 	if appconfig.SendWelcomeMessageOn == 0 {
 		return
 	}
-	time.Sleep(time.Second * 2)
+	// 等待用户数据持久化完成（该函数在 goroutine 中调用）
+	time.Sleep(500 * time.Millisecond)
 	//发送登录欢迎消息
 	lastLoginLog := u.loginLog.getLastLoginIP(uid)
 	content := u.ctx.GetConfig().WelcomeMessage

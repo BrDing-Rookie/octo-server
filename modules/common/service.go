@@ -100,7 +100,7 @@ func runGenShortnoTask(ctx *config.Context) {
 	for {
 		count, err := shortnoDB.queryVailCount()
 		if err != nil {
-			time.Sleep(errorSleep)
+			time.Sleep(errorSleep) // 错误后退避重试
 			continue
 		}
 		if count < 10000 {
@@ -112,7 +112,7 @@ func runGenShortnoTask(ctx *config.Context) {
 				}
 			}
 		}
-		time.Sleep(time.Second * 30)
+		time.Sleep(time.Second * 30) // 后台任务轮询间隔
 	}
 }
 

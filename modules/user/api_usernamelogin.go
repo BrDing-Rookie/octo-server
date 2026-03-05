@@ -507,7 +507,8 @@ type usernameRegisterReq struct {
 
 // sendBotWelcomeMessages 新用户注册后自动发送 Bot 欢迎消息
 func (u *User) sendBotWelcomeMessages(uid string) {
-	time.Sleep(time.Second * 1) // 等待注册完成
+	// 短暂等待确保用户数据已持久化到数据库（该函数在 goroutine 中调用）
+	time.Sleep(300 * time.Millisecond)
 
 	// BotFather 欢迎消息
 	err := u.ctx.SendMessage(&config.MsgSendReq{

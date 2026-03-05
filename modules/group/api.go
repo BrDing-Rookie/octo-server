@@ -2829,11 +2829,11 @@ func (g *Group) CheckForbiddenLoop() {
 		models, err := g.db.queryForbiddenExpirationTimeMembers(limit)
 		if err != nil {
 			g.Warn("查询禁言成员信息错误", zap.Error(err))
-			time.Sleep(errSleep)
+			time.Sleep(errSleep) // 错误后退避重试
 			continue
 		}
 		if len(models) <= 0 {
-			time.Sleep(noDataSleep)
+			time.Sleep(noDataSleep) // 无数据时降低轮询频率
 			continue
 		}
 		for _, model := range models {
