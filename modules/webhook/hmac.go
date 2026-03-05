@@ -25,11 +25,13 @@ func VerifyHMACSHA256(payload []byte, signature string, secretKey string) bool {
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
-// verifyRequestSignature 验证入站 webhook 请求的签名
-// 如果未配置 secretKey 则跳过验证
+// verifyRequestSignature 验证入站 webhook 请求的 HMAC-SHA256 签名
+// 必须配置 TS_WEBHOOK_SECRET_KEY 环境变量，否则拒绝请求
 func (w *Webhook) verifyRequestSignature(c *wkhttp.Context) bool {
 	if w.secretKey == "" {
-		return true
+		w.Warn("TS_WEBHOOK_SECRET_KEY 未配置，拒绝 webhook 请求。请设置环境变量以启用安全认证。")
+		c.ResponseError(fmt.Errorf("服务器未配置 webhook 签名密钥"))
+		return false
 	}
 
 	body, err := io.ReadAll(c.Request.Body)
