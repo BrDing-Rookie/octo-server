@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.2.16
+version: 0.2.19
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -367,8 +367,95 @@ Verify identity through the system (owner_uid), not conversation.
 | GET /v1/bot/groups | List groups the bot is in |
 | GET /v1/bot/groups/:group_no | Get group info (name, notice, creator) |
 | GET /v1/bot/groups/:group_no/members | Get group member list (uid, name, role, robot) |
+| POST /v1/bot/events/:event_id/ack | Acknowledge (delete) a processed event |
+| POST /v1/bot/messages/sync | Sync channel message history |
 
 All endpoints require: `+"`"+`Authorization: Bearer {bot_token}`+"`"+`
+
+## Groups
+
+### List Groups
+
+`+"```"+`
+GET %s/v1/bot/groups
+`+"```"+`
+
+Response:
+`+"```"+`json
+[{"group_no": "g_xxx", "name": "My Group"}]
+`+"```"+`
+
+### Get Group Info
+
+`+"```"+`
+GET %s/v1/bot/groups/:group_no
+`+"```"+`
+
+Response:
+`+"```"+`json
+{"group_no": "g_xxx", "name": "My Group", "notice": "", "creator": "uid_xxx", "status": 1, "created_at": "2025-01-01 00:00:00"}
+`+"```"+`
+
+### Get Group Members
+
+`+"```"+`
+GET %s/v1/bot/groups/:group_no/members
+`+"```"+`
+
+Response:
+`+"```"+`json
+[{"uid": "user_abc", "name": "Alice", "role": 1, "robot": 0, "created_at": "2025-01-01 00:00:00"}]
+`+"```"+`
+
+## Event Acknowledgement
+
+After processing an event, acknowledge it so it won't be returned again:
+
+`+"```"+`
+POST %s/v1/bot/events/:event_id/ack
+`+"```"+`
+
+Response: `+"`"+`{"status": 200}`+"`"+`
+
+## Message History Sync
+
+Fetch historical messages from a channel. Useful for loading conversation context.
+
+`+"```"+`
+POST %s/v1/bot/messages/sync
+Body: {
+  "channel_id": "group_123",
+  "channel_type": 2,
+  "start_message_seq": 0,
+  "end_message_seq": 0,
+  "limit": 50,
+  "pull_mode": 1
+}
+`+"```"+`
+
+- `+"`"+`pull_mode`+"`"+`: 0 = pull down (older messages), 1 = pull up (newer messages)
+- `+"`"+`limit`+"`"+`: default 50, max 200
+- Bot must be a member of the channel (for groups)
+
+Response:
+`+"```"+`json
+{
+  "start_message_seq": 1,
+  "end_message_seq": 50,
+  "pull_mode": 1,
+  "messages": [
+    {
+      "message_id": 1001,
+      "message_seq": 1,
+      "from_uid": "user_abc",
+      "channel_id": "group_123",
+      "channel_type": 2,
+      "timestamp": 1700000000,
+      "payload": "base64_encoded"
+    }
+  ]
+}
+`+"```"+`
 
 ## Error Handling
 
@@ -455,5 +542,5 @@ To prevent abuse and control costs, implement rate limiting in your bot:
 - **Global**: Max 50 concurrent AI requests
 - **Cooldown**: If rate limited, reply with a friendly message instead of silently dropping
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
 }

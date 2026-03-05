@@ -71,6 +71,7 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.POST("/stream/start", bf.streamStart)
 		botAPI.POST("/stream/end", bf.streamEnd)
 		botAPI.POST("/heartbeat", bf.heartbeat)
+		botAPI.POST("/messages/sync", bf.syncMessages)
 		botAPI.GET("/groups", bf.getGroups)
 		botAPI.GET("/groups/:group_no", bf.getGroupInfo)
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)

@@ -3,10 +3,74 @@ package botfather
 import (
 	"errors"
 	"net/http"
+	"strings"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
+
+// syncMessages 同步频道历史消息
+func (bf *BotFather) syncMessages(c *wkhttp.Context) {
+	var req BotSyncMessagesReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("数据格式有误"))
+		return
+	}
+	if strings.TrimSpace(req.ChannelID) == "" {
+		c.ResponseError(errors.New("channel_id不能为空"))
+		return
+	}
+	if req.ChannelType == 0 {
+		c.ResponseError(errors.New("channel_type不能为空"))
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = 50
+	}
+	if req.Limit > 200 {
+		req.Limit = 200
+	}
+
+	robotID := getRobotIDFromContext(c)
+
+	// 群聊场景：验证 bot 是否在群内
+	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		var count int
+		_, err := bf.db.session.SelectBySql(
+			"SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=? AND is_deleted=0",
+			req.ChannelID, robotID,
+		).Load(&count)
+		if err != nil {
+			bf.Error("查询群成员失败", zap.Error(err))
+			c.ResponseError(errors.New("查询群成员失败"))
+			return
+		}
+		if count == 0 {
+			c.ResponseError(errors.New("bot is not a member of this group"))
+			return
+		}
+	}
+
+	syncReq := config.SyncChannelMessageReq{
+		LoginUID:        robotID,
+		ChannelID:       req.ChannelID,
+		ChannelType:     req.ChannelType,
+		StartMessageSeq: req.StartMessageSeq,
+		EndMessageSeq:   req.EndMessageSeq,
+		Limit:           req.Limit,
+		PullMode:        config.PullMode(req.PullMode),
+	}
+	resp, err := bf.ctx.IMSyncChannelMessage(syncReq)
+	if err != nil {
+		bf.Error("同步消息失败", zap.Error(err))
+		c.ResponseError(errors.New("同步消息失败"))
+		return
+	}
+
+	c.Response(resp)
+}
 
 // getGroups 获取机器人所在的群组列表
 func (bf *BotFather) getGroups(c *wkhttp.Context) {

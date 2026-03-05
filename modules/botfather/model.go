@@ -56,6 +56,16 @@ type BotReadReceiptReq struct {
 	MessageIDs  []string `json:"message_ids"`
 }
 
+// BotSyncMessagesReq Bot同步历史消息请求
+type BotSyncMessagesReq struct {
+	ChannelID       string `json:"channel_id"`
+	ChannelType     uint8  `json:"channel_type"`
+	StartMessageSeq uint32 `json:"start_message_seq"`
+	EndMessageSeq   uint32 `json:"end_message_seq"`
+	Limit           int    `json:"limit"`
+	PullMode        int    `json:"pull_mode"`
+}
+
 // BotHeartbeatReq Bot心跳请求（REST模式）
 type BotHeartbeatReq struct{}
 
