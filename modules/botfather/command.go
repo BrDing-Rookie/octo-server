@@ -82,6 +82,12 @@ func (h *commandHandler) handleCommand(fromUID string, cmd string) {
 		h.handleToken(fromUID)
 	case CmdRevoke:
 		h.handleRevoke(fromUID)
+	case CmdApprove:
+		h.handleApprove(fromUID, strings.TrimPrefix(cmd, command+" "))
+	case CmdReject:
+		h.handleReject(fromUID, strings.TrimPrefix(cmd, command+" "))
+	case CmdPending:
+		h.handlePending(fromUID)
 	case CmdHelp, CmdStart:
 		h.handleHelp(fromUID)
 	default:
@@ -288,6 +294,9 @@ func (h *commandHandler) handleHelp(fromUID string) {
 /deletebot - 删除机器人
 /token - 查看 Token
 /revoke - 重置 Token
+/pending - 查看待审批好友申请
+/approve - 通过好友申请
+/reject - 拒绝好友申请
 /cancel - 取消当前操作
 /help - 显示帮助`)
 }

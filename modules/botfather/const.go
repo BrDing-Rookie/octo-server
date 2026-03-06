@@ -33,6 +33,9 @@ const (
 	CmdCancel         = "/cancel"
 	CmdHelp           = "/help"
 	CmdStart          = "/start"
+	CmdApprove        = "/approve"
+	CmdReject         = "/reject"
+	CmdPending        = "/pending"
 )
 
 // 对话状态

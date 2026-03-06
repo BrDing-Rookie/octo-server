@@ -484,6 +484,12 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("发送好友申请失败！"))
 		return
 	}
+
+	// 如果目标是机器人，通知 owner 审批
+	if toUser.Robot == 1 && botFriendApplyHook != nil {
+		go botFriendApplyHook(fromUID, fromName, toUser.UID, req.Remark, token)
+	}
+
 	c.ResponseOK()
 }
 

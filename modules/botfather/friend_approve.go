@@ -1,0 +1,415 @@
+package botfather
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	common "github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	user "github.com/Mininglamp-OSS/octo-server/modules/user"
+	"go.uber.org/zap"
+)
+
+const (
+	// Redis key for pending bot friend applies: botfather:friend_apply:<robot_id>:<apply_uid>
+	botFriendApplyPrefix = "botfather:friend_apply:"
+	botFriendApplyTTL    = 7 * 24 * time.Hour // 7 days
+	// Redis SET key to track all pending applies for a robot
+	botFriendApplySetPrefix = "botfather:friend_apply_set:"
+)
+
+// BotFriendApply 机器人好友申请记录
+type BotFriendApply struct {
+	ApplyUID  string `json:"apply_uid"`
+	ApplyName string `json:"apply_name"`
+	RobotID   string `json:"robot_id"`
+	Remark    string `json:"remark"`
+	Token     string `json:"token"` // friend apply token from cache
+	CreatedAt int64  `json:"created_at"`
+}
+
+// StoreBotFriendApply 存储机器人好友申请
+func (h *commandHandler) StoreBotFriendApply(apply *BotFriendApply) error {
+	key := fmt.Sprintf("%s%s:%s", botFriendApplyPrefix, apply.RobotID, apply.ApplyUID)
+	setKey := fmt.Sprintf("%s%s", botFriendApplySetPrefix, apply.RobotID)
+
+	apply.CreatedAt = time.Now().Unix()
+	data := util.ToJson(apply)
+
+	err := h.ctx.GetRedisConn().SetAndExpire(key, data, botFriendApplyTTL)
+	if err != nil {
+		return err
+	}
+	// Add to set for listing, refresh set TTL
+	err = h.ctx.GetRedisConn().SAdd(setKey, apply.ApplyUID)
+	if err != nil {
+		return err
+	}
+	return h.ctx.GetRedisConn().Expire(setKey, botFriendApplyTTL)
+}
+
+// GetBotFriendApply 获取某个好友申请
+func (h *commandHandler) GetBotFriendApply(robotID, applyUID string) (*BotFriendApply, error) {
+	key := fmt.Sprintf("%s%s:%s", botFriendApplyPrefix, robotID, applyUID)
+	data, err := h.ctx.GetRedisConn().GetString(key)
+	if err != nil {
+		return nil, err
+	}
+	if data == "" {
+		return nil, nil
+	}
+	var apply BotFriendApply
+	err = util.ReadJsonByByte([]byte(data), &apply)
+	if err != nil {
+		return nil, err
+	}
+	return &apply, nil
+}
+
+// DeleteBotFriendApply 删除好友申请记录
+func (h *commandHandler) DeleteBotFriendApply(robotID, applyUID string) error {
+	key := fmt.Sprintf("%s%s:%s", botFriendApplyPrefix, robotID, applyUID)
+	setKey := fmt.Sprintf("%s%s", botFriendApplySetPrefix, robotID)
+	err := h.ctx.GetRedisConn().Del(key)
+	if err != nil {
+		return err
+	}
+	return h.ctx.GetRedisConn().SRem(setKey, applyUID)
+}
+
+// GetPendingApplies 获取某个机器人的所有待审批好友申请
+func (h *commandHandler) GetPendingApplies(robotID string) ([]*BotFriendApply, error) {
+	setKey := fmt.Sprintf("%s%s", botFriendApplySetPrefix, robotID)
+	members, err := h.ctx.GetRedisConn().SMembers(setKey)
+	if err != nil {
+		return nil, err
+	}
+	applies := make([]*BotFriendApply, 0)
+	for _, applyUID := range members {
+		apply, err := h.GetBotFriendApply(robotID, applyUID)
+		if err != nil {
+			h.Warn("查询好友申请失败", zap.String("robotID", robotID), zap.String("applyUID", applyUID), zap.Error(err))
+			continue
+		}
+		if apply == nil {
+			// expired, clean up set
+			_ = h.ctx.GetRedisConn().SRem(setKey, applyUID)
+			continue
+		}
+		applies = append(applies, apply)
+	}
+	return applies, nil
+}
+
+// GetAllPendingAppliesForOwner 获取某个 owner 所有 bot 的待审批好友申请
+func (h *commandHandler) GetAllPendingAppliesForOwner(ownerUID string) ([]*BotFriendApply, error) {
+	bots, err := h.db.queryRobotsByCreatorUID(ownerUID)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]*BotFriendApply, 0)
+	for _, bot := range bots {
+		applies, err := h.GetPendingApplies(bot.RobotID)
+		if err != nil {
+			continue
+		}
+		all = append(all, applies...)
+	}
+	return all, nil
+}
+
+// approveFriend 通过好友申请：建立双向好友关系 + 通知双方
+func (h *commandHandler) approveFriend(ownerUID string, applyUID string, robotID string) {
+	// 1. 验证 bot 归属
+	bot, err := h.db.queryRobotByRobotID(robotID)
+	if err != nil || bot == nil {
+		h.reply(ownerUID, "❌ 机器人不存在")
+		return
+	}
+	if bot.CreatorUID != ownerUID {
+		h.reply(ownerUID, "❌ 你不是该机器人的创建者")
+		return
+	}
+
+	// 2. 检查申请是否存在
+	apply, err := h.GetBotFriendApply(robotID, applyUID)
+	if err != nil || apply == nil {
+		h.reply(ownerUID, "❌ 好友申请不存在或已过期")
+		return
+	}
+
+	// 3. 建立双向好友关系
+	err = h.userService.AddFriend(applyUID, &user.FriendReq{
+		UID:   applyUID,
+		ToUID: robotID,
+	})
+	if err != nil {
+		h.Warn("添加好友关系(user->bot)失败", zap.Error(err))
+		h.reply(ownerUID, fmt.Sprintf("❌ 添加好友关系失败: %v", err))
+		return
+	}
+	err = h.userService.AddFriend(robotID, &user.FriendReq{
+		UID:   robotID,
+		ToUID: applyUID,
+	})
+	if err != nil {
+		h.Warn("添加好友关系(bot->user)失败", zap.Error(err))
+		h.reply(ownerUID, fmt.Sprintf("❌ 添加好友关系失败: %v", err))
+		return
+	}
+
+	// 4. 添加 IM 白名单（双向），允许双方发消息
+	err = h.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   applyUID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{robotID},
+	})
+	if err != nil {
+		h.Warn("添加IM白名单(user channel)失败", zap.Error(err))
+	}
+	err = h.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   robotID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{applyUID},
+	})
+	if err != nil {
+		h.Warn("添加IM白名单(bot channel)失败", zap.Error(err))
+	}
+
+	// 5. 修复 friend version
+	h.fixFriendVersion(applyUID, robotID)
+	h.fixFriendVersion(robotID, applyUID)
+
+	// 6. 更新好友申请记录状态
+	applyRecord, _ := h.queryFriendApplyRecord(robotID, applyUID)
+	if applyRecord != nil {
+		_ = h.updateFriendApplyStatus(robotID, applyUID, 1) // 1=已通过
+	}
+
+	// 7. 通知双方
+	content := "我们已经是好友了，可以愉快的聊天了！"
+	if h.ctx.GetConfig().Friend.AddedTipsText != "" {
+		content = h.ctx.GetConfig().Friend.AddedTipsText
+	}
+
+	// Send CMD to sync friend list on both clients
+	_ = h.ctx.SendCMD(config.MsgCMDReq{
+		CMD:         common.CMDFriendAccept,
+		Subscribers: []string{applyUID, robotID},
+		Param: map[string]interface{}{
+			"to_uid":   applyUID,
+			"from_uid": robotID,
+		},
+	})
+
+	// Send tip message
+	payload := []byte(util.ToJson(map[string]interface{}{
+		"content": content,
+		"type":    common.Tip,
+	}))
+	_ = h.ctx.SendMessage(&config.MsgSendReq{
+		FromUID:     robotID,
+		ChannelID:   applyUID,
+		ChannelType: common.ChannelTypePerson.Uint8(),
+		Payload:     payload,
+		Header: config.MsgHeader{
+			RedDot: 1,
+		},
+	})
+
+	// 8. 清理 Redis
+	_ = h.DeleteBotFriendApply(robotID, applyUID)
+
+	// 9. 回复 owner
+	h.reply(ownerUID, fmt.Sprintf("✅ 已通过「%s」添加「%s」的好友申请", apply.ApplyName, robotID))
+}
+
+// rejectFriend 拒绝好友申请
+func (h *commandHandler) rejectFriend(ownerUID string, applyUID string, robotID string) {
+	bot, err := h.db.queryRobotByRobotID(robotID)
+	if err != nil || bot == nil {
+		h.reply(ownerUID, "❌ 机器人不存在")
+		return
+	}
+	if bot.CreatorUID != ownerUID {
+		h.reply(ownerUID, "❌ 你不是该机器人的创建者")
+		return
+	}
+
+	apply, err := h.GetBotFriendApply(robotID, applyUID)
+	if err != nil || apply == nil {
+		h.reply(ownerUID, "❌ 好友申请不存在或已过期")
+		return
+	}
+
+	// 更新状态
+	_ = h.updateFriendApplyStatus(robotID, applyUID, 2) // 2=已拒绝
+
+	// 清理
+	_ = h.DeleteBotFriendApply(robotID, applyUID)
+
+	h.reply(ownerUID, fmt.Sprintf("❌ 已拒绝「%s」添加「%s」的好友申请", apply.ApplyName, robotID))
+}
+
+// queryFriendApplyRecord 查询好友申请记录
+func (h *commandHandler) queryFriendApplyRecord(robotID, applyUID string) (map[string]interface{}, error) {
+	var count int
+	err := h.db.session.Select("count(*)").From("friend_apply_record").
+		Where("uid=? and to_uid=?", robotID, applyUID).LoadOne(&count)
+	if err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	return map[string]interface{}{"exists": true}, nil
+}
+
+// updateFriendApplyStatus 更新好友申请状态
+func (h *commandHandler) updateFriendApplyStatus(robotID, applyUID string, status int) error {
+	_, err := h.db.session.Update("friend_apply_record").
+		Set("status", status).
+		Where("uid=? and to_uid=?", robotID, applyUID).Exec()
+	return err
+}
+
+// RegisterFriendApplyHook 注册好友申请通知回调到 user 模块
+func RegisterFriendApplyHook(ctx *config.Context) {
+	user.RegisterBotFriendApplyHook(func(applyUID, applyName, robotID, remark, token string) {
+		notifyOwnerFriendApply(ctx, applyUID, applyName, robotID, remark, token)
+	})
+}
+
+// notifyOwnerFriendApply 通知 bot owner 有好友申请
+func notifyOwnerFriendApply(ctx *config.Context, applyUID, applyName, robotID, remark, token string) {
+	handler := newCommandHandler(ctx)
+	l := log.NewTLog("BotFather")
+
+	// 查询 bot
+	bot, err := handler.db.queryRobotByRobotID(robotID)
+	if err != nil || bot == nil {
+		l.Warn("查询机器人失败", zap.String("robotID", robotID), zap.Error(err))
+		return
+	}
+
+	// 存储申请
+	apply := &BotFriendApply{
+		ApplyUID:  applyUID,
+		ApplyName: applyName,
+		RobotID:   robotID,
+		Remark:    remark,
+		Token:     token,
+	}
+	err = handler.StoreBotFriendApply(apply)
+	if err != nil {
+		l.Warn("存储好友申请失败", zap.Error(err))
+		return
+	}
+
+	// 通知 owner
+	remarkText := ""
+	if remark != "" {
+		remarkText = fmt.Sprintf("\n备注：%s", remark)
+	}
+
+	msg := fmt.Sprintf("📨 好友申请\n用户「%s」(%s) 申请添加你的机器人「%s」为好友%s\n\n/approve %s %s\n/reject %s %s",
+		applyName, applyUID, robotID, remarkText,
+		applyUID, robotID,
+		applyUID, robotID,
+	)
+	handler.reply(bot.CreatorUID, msg)
+}
+
+// handlePending 处理 /pending 命令
+func (h *commandHandler) handlePending(fromUID string) {
+	applies, err := h.GetAllPendingAppliesForOwner(fromUID)
+	if err != nil {
+		h.reply(fromUID, "查询失败，请稍后重试。")
+		return
+	}
+	if len(applies) == 0 {
+		h.reply(fromUID, "📋 没有待审批的好友申请")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📋 待审批好友申请（%d 条）：\n\n", len(applies)))
+	for i, apply := range applies {
+		ago := time.Since(time.Unix(apply.CreatedAt, 0)).Truncate(time.Minute)
+		agoStr := "刚刚"
+		if ago >= time.Hour*24 {
+			agoStr = fmt.Sprintf("%d天前", int(ago.Hours()/24))
+		} else if ago >= time.Hour {
+			agoStr = fmt.Sprintf("%d小时前", int(ago.Hours()))
+		} else if ago >= time.Minute {
+			agoStr = fmt.Sprintf("%d分钟前", int(ago.Minutes()))
+		}
+
+		sb.WriteString(fmt.Sprintf("%d. %s → %s (%s)\n", i+1, apply.ApplyName, apply.RobotID, agoStr))
+		if apply.Remark != "" {
+			sb.WriteString(fmt.Sprintf("   备注：%s\n", apply.Remark))
+		}
+		sb.WriteString(fmt.Sprintf("   /approve %s %s\n\n", apply.ApplyUID, apply.RobotID))
+	}
+	h.reply(fromUID, sb.String())
+}
+
+// handleApprove 处理 /approve 命令
+func (h *commandHandler) handleApprove(fromUID string, args string) {
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		h.reply(fromUID, "用法：/approve <用户ID> <机器人ID>\n或：/approve all <机器人ID>")
+		return
+	}
+
+	targetUID := parts[0]
+	robotID := parts[1]
+
+	if targetUID == "all" {
+		// 批量通过
+		applies, err := h.GetPendingApplies(robotID)
+		if err != nil || len(applies) == 0 {
+			h.reply(fromUID, fmt.Sprintf("「%s」没有待审批的好友申请", robotID))
+			return
+		}
+		for _, apply := range applies {
+			h.approveFriend(fromUID, apply.ApplyUID, robotID)
+		}
+		return
+	}
+
+	h.approveFriend(fromUID, targetUID, robotID)
+}
+
+// handleReject 处理 /reject 命令
+func (h *commandHandler) handleReject(fromUID string, args string) {
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		h.reply(fromUID, "用法：/reject <用户ID> <机器人ID>\n或：/reject all <机器人ID>")
+		return
+	}
+
+	targetUID := parts[0]
+	robotID := parts[1]
+
+	if targetUID == "all" {
+		applies, err := h.GetPendingApplies(robotID)
+		if err != nil || len(applies) == 0 {
+			h.reply(fromUID, fmt.Sprintf("「%s」没有待审批的好友申请", robotID))
+			return
+		}
+		for _, apply := range applies {
+			h.rejectFriend(fromUID, apply.ApplyUID, robotID)
+		}
+		return
+	}
+
+	h.rejectFriend(fromUID, targetUID, robotID)
+}

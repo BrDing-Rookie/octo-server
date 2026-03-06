@@ -55,6 +55,9 @@ func New(ctx *config.Context) *BotFather {
 	// 注册消息监听器
 	ctx.AddMessagesListener(bf.messagesListen)
 
+	// 注册好友申请通知回调
+	RegisterFriendApplyHook(ctx)
+
 	return bf
 }
 
