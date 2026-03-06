@@ -205,7 +205,7 @@ func PostForWWWFormReXML(urlStr string, params map[string]string, headers map[st
 	}
 	defer resp.Body.Close()
 	respData, err := io.ReadAll(resp.Body)
-	fmt.Println(string(respData))
+	// respData logged at caller if needed
 	if err != nil {
 		return []byte(""), err
 	}

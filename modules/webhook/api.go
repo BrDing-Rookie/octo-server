@@ -427,7 +427,16 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 				isVideoCall = true
 			}
 		}
-		contentTypeInt64, _ := contentMap["type"].(json.Number).Int64()
+		typeVal, ok := contentMap["type"].(json.Number)
+		if !ok {
+			w.Warn("消息type字段类型不正确", zap.Any("type", contentMap["type"]))
+			return nil
+		}
+		contentTypeInt64, err := typeVal.Int64()
+		if err != nil {
+			w.Warn("消息type解析失败", zap.Error(err))
+			return nil
+		}
 		contentType := common.ContentType(contentTypeInt64)
 		msgResp.ContentType = int(contentType)
 	}
