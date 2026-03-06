@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.2.26
+version: 0.2.28
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -126,6 +126,33 @@ channels:
       bot-b:
         botToken: "TOKEN_B"
 `+"```"+`
+
+### Multi-Agent Setup Guide
+
+When one owner creates multiple bots (e.g. via BotFather /newbot), each bot can be connected to a separate AI Agent. Each bot gets its own accountId in the OpenClaw config with independent settings.
+
+Example: an owner creates bot-translator, bot-coder, and bot-assistant — each backed by a different OpenClaw agent configuration.
+
+`+"```"+`yaml
+channels:
+  dmwork:
+    apiUrl: "%s"
+    accounts:
+      bot-translator:
+        botToken: "TOKEN_TRANSLATOR"
+        agentModel: "claude-sonnet-4-6"
+        systemPrompt: "You are a professional translator."
+      bot-coder:
+        botToken: "TOKEN_CODER"
+        agentModel: "claude-sonnet-4-6"
+        systemPrompt: "You are a code review assistant."
+      bot-assistant:
+        botToken: "TOKEN_ASSISTANT"
+        agentModel: "claude-sonnet-4-6"
+        systemPrompt: "You are a general-purpose assistant."
+`+"```"+`
+
+v0.2.28+ supports full multi-bot isolation: each bot maintains an independent WebSocket connection with no message cross-processing between bots.
 
 The gateway auto-detects config changes and reloads the plugin.
 If the gateway was started before plugin install, restart it after your current conversation ends.
@@ -540,9 +567,10 @@ Save detailed explanations for DM conversations.
 | Bot shows "offline" | Heartbeat stopped | Send POST /v1/bot/heartbeat every 30s |
 | No messages received | WS not connected | Check wsUrl and bot token; adapter auto-reconnects |
 | WS connection drops | Network issue | SDK auto-reconnects; verify wsUrl |
-| Duplicate replies | Multiple bot instances | Ensure only one instance per bot_token |
+| Duplicate replies | Multiple bot instances or pre-v0.2.28 plugin | Upgrade to openclaw-channel-dmwork >= 0.2.28 (independent WebSocket per bot). Ensure only one instance per bot_token. |
 | 401 on API calls | Token expired/invalid | Re-register with POST /v1/bot/register |
 | Slow AI responses | High concurrency | Implement response queue, consider caching |
+| Bot-to-bot message loop | Bots replying to each other | v0.2.28+ auto-filters known bot UIDs. Ensure all bots run on same OpenClaw instance. |
 | Messages out of order | Async processing | Use message_seq for ordering |
 
 ## Rate Limiting (Recommended)
@@ -553,5 +581,5 @@ To prevent abuse and control costs, implement rate limiting in your bot:
 - **Global**: Max 50 concurrent AI requests
 - **Cooldown**: If rate limited, reply with a friendly message instead of silently dropping
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
 }
