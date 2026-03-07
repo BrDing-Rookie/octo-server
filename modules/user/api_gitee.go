@@ -240,7 +240,7 @@ func (u *User) giteeOAuth(c *wkhttp.Context) {
 
 func (u *User) requestGiteeUserInfo(accessToken string) (*giteeUserInfo, error) {
 	userInfo := &giteeUserInfo{}
-	resp, err := network.Get(fmt.Sprintf("https://gitee.com/api/v5/user?access_token=%s", accessToken), nil, nil)
+	resp, err := network.Get("https://gitee.com/api/v5/user", nil, map[string]string{"Authorization": fmt.Sprintf("Bearer %s", accessToken)})
 	if err != nil {
 		return nil, err
 	}
