@@ -855,7 +855,8 @@ Multi-bot config (when other bots already exist):
 Also add bindings for each bot:
 {"agentId":"YOUR_AGENT_ID","match":{"channel":"dmwork","accountId":"YOUR_BOT_ID"}}
 
-Do NOT run "openclaw gateway restart" — the gateway auto-detects config changes.
+Always set: {"session":{"dmScope":"per-account-channel-peer"}}
+Do NOT run "openclaw gateway restart" — auto-reloads.
 Simply confirm the steps are complete and stop.
 ---
 
