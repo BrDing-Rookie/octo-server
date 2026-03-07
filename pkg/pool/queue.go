@@ -1,11 +1,11 @@
 package pool
 
 import (
-	"github.com/eapache/queue"
 	"runtime"
 	"sync"
-)
 
+	"github.com/eapache/queue"
+)
 
 type Queue struct {
 	sync.Mutex
@@ -39,7 +39,7 @@ func (e *Queue) Close() {
 	}
 }
 
-//Pop 取出队列,（阻塞模式）
+// Pop 取出队列,（阻塞模式）
 func (e *Queue) Pop() (v interface{}) {
 	c := e.popable
 	buffer := e.buffer
@@ -62,7 +62,7 @@ func (e *Queue) Pop() (v interface{}) {
 	return
 }
 
-//试着取出队列（非阻塞模式）返回ok == false 表示空
+// 试着取出队列（非阻塞模式）返回ok == false 表示空
 func (e *Queue) TryPop() (v interface{}, ok bool) {
 	buffer := e.buffer
 
@@ -80,15 +80,20 @@ func (e *Queue) TryPop() (v interface{}, ok bool) {
 	return
 }
 
-// 获取队列长度
+// Len 获取队列长度
 func (e *Queue) Len() int {
+	e.Mutex.Lock()
+	defer e.Mutex.Unlock()
 	return e.buffer.Length()
 }
 
-//Wait 等待队列消费完成
+// Wait 等待队列消费完成
 func (e *Queue) Wait() {
 	for {
-		if e.closed || e.buffer.Length() == 0 {
+		e.Mutex.Lock()
+		done := e.closed || e.buffer.Length() == 0
+		e.Mutex.Unlock()
+		if done {
 			break
 		}
 
