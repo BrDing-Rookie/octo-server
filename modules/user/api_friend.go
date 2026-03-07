@@ -485,15 +485,77 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		return
 	}
 
-	// 如果目标是机器人，通知 owner 审批
-	if toUser.Robot == 1 && botFriendApplyHook != nil {
-		go botFriendApplyHook(fromUID, fromName, toUser.UID, req.Remark, token)
+	// 如果目标是机器人，检查是否自动通过
+	if toUser.Robot == 1 {
+		var autoApprove int
+		_ = f.ctx.DB().Select("IFNULL(auto_approve,1)").From("robot").Where("robot_id=? AND status=1", toUser.UID).LoadOne(&autoApprove)
+		if autoApprove == 1 {
+			// 自动通过好友申请
+			go f.autoApproveFriend(fromUID, toUser.UID, token)
+		} else if botFriendApplyHook != nil {
+			// 需要 owner 审批
+			go botFriendApplyHook(fromUID, fromName, toUser.UID, req.Remark, token)
+		}
 	}
 
 	c.ResponseOK()
 }
 
 // 确认好友
+// autoApproveFriend Bot 自动通过好友申请
+func (f *Friend) autoApproveFriend(fromUID string, botUID string, token string) {
+	// 建立双向好友关系
+	tx, err := f.ctx.DB().Begin()
+	if err != nil {
+		f.Error("auto approve: 开启事务失败", zap.Error(err))
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// fromUID -> botUID
+	err = f.db.InsertTx(&FriendModel{
+		UID:   fromUID,
+		ToUID: botUID,
+	}, tx)
+	if err != nil {
+		f.Warn("auto approve: 添加好友关系失败(可能已存在)", zap.Error(err))
+	}
+	// botUID -> fromUID
+	err = f.db.InsertTx(&FriendModel{
+		UID:   botUID,
+		ToUID: fromUID,
+	}, tx)
+	if err != nil {
+		f.Warn("auto approve: 添加反向好友关系失败(可能已存在)", zap.Error(err))
+	}
+	// 更新申请状态
+	apply, _ := f.db.queryApplyWithUidAndToUid(botUID, fromUID)
+	if apply != nil {
+		apply.Status = 1
+		_ = f.db.updateApplyTx(apply, tx)
+	}
+	if err = tx.Commit(); err != nil {
+		tx.Rollback()
+		f.Error("auto approve: 提交事务失败", zap.Error(err))
+		return
+	}
+	// 发送好友确认 CMD
+	_ = f.ctx.SendCMD(config.MsgCMDReq{
+		CMD:         common.CMDFriendAccept,
+		ChannelID:   fromUID,
+		ChannelType: common.ChannelTypePerson.Uint8(),
+		Param: map[string]interface{}{
+			"from_uid": botUID,
+			"to_uid":   fromUID,
+		},
+	})
+	f.Info("Bot auto approve friend", zap.String("bot", botUID), zap.String("user", fromUID))
+}
+
 func (f *Friend) friendSure(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	name := c.GetLoginName()
