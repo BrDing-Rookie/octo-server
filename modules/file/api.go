@@ -220,7 +220,11 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 
 // 获取文件
 func (f *File) getFile(c *wkhttp.Context) {
-	ph := c.Param("path")
+	ph, err := sanitizePath(c.Param("path"))
+	if err != nil {
+		c.ResponseError(err)
+		return
+	}
 	if ph == "" {
 		c.Response(errors.New("访问路径不能为空"))
 		return
