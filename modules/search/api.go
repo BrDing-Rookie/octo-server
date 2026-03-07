@@ -3,6 +3,7 @@ package search
 import (
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
@@ -256,7 +257,8 @@ func (s *Search) global(c *wkhttp.Context) {
 				}
 			}
 			if isAdd {
-				name := strings.ReplaceAll(g.Name, req.Keyword, fmt.Sprintf("<mark>%s</mark>", req.Keyword))
+				escapedKeyword := html.EscapeString(req.Keyword)
+				name := strings.ReplaceAll(g.Name, req.Keyword, fmt.Sprintf("<mark>%s</mark>", escapedKeyword))
 				groupResps = append(groupResps, &channelResp{
 					ChannelID:     g.GroupNo,
 					ChannelType:   common.ChannelTypeGroup.Uint8(),
@@ -278,7 +280,8 @@ func (s *Search) global(c *wkhttp.Context) {
 		}
 		if len(friends) > 0 {
 			for _, friend := range friends {
-				name := strings.ReplaceAll(friend.Name, req.Keyword, fmt.Sprintf("<mark>%s</mark>", req.Keyword))
+				escapedKeyword := html.EscapeString(req.Keyword)
+				name := strings.ReplaceAll(friend.Name, req.Keyword, fmt.Sprintf("<mark>%s</mark>", escapedKeyword))
 				friendResps = append(friendResps, &channelResp{
 					ChannelID:     friend.UID,
 					ChannelName:   name,
