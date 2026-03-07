@@ -459,7 +459,13 @@ func (g *Group) list(c *wkhttp.Context) {
 		resps := make([]*GroupResp, 0)
 		for _, model := range groups {
 			groupResp := &GroupResp{}
-			resps = append(resps, groupResp.fromModel(model))
+			resp := groupResp.fromModel(model)
+			// 查询成员数
+			memberCount, err := g.db.QueryMemberCount(model.GroupNo)
+			if err == nil {
+				resp.MemberCount = int(memberCount)
+			}
+			resps = append(resps, resp)
 		}
 		c.Response(resps)
 		return
