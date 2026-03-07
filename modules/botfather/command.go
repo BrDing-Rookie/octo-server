@@ -592,6 +592,16 @@ func (h *commandHandler) onDeleteConfirm(fromUID string, input string) {
 		return
 	}
 
+	// 释放用户表中的 username 和 short_no，允许后续复用该标识符
+	_, err = h.ctx.DB().Update("user").
+		Set("username", "").
+		Set("short_no", "").
+		Where("uid=?", botID).
+		Exec()
+	if err != nil {
+		h.Error("释放Bot用户名失败", zap.String("botID", botID), zap.Error(err))
+	}
+
 	h.sm.Clear(fromUID)
 	h.reply(fromUID, fmt.Sprintf("机器人 %s 已删除。", botID))
 }
