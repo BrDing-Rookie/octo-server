@@ -294,9 +294,9 @@ func (h *commandHandler) handleHelp(fromUID string) {
 /deletebot - 删除机器人
 /token - 查看 Token
 /revoke - 重置 Token
-/pending - 查看待审批好友申请
-/approve - 通过好友申请
-/reject - 拒绝好友申请
+/pending - 查看待处理申请（已弃用）
+/approve - 通过申请（已弃用）
+/reject - 拒绝申请（已弃用）
 /cancel - 取消当前操作
 /help - 显示帮助`)
 }
@@ -569,6 +569,14 @@ func (h *commandHandler) onDeleteConfirm(fromUID string, input string) {
 		}
 	}
 
+	// Remove bot from all Spaces
+	_, err = h.ctx.DB().UpdateBySql(
+		"UPDATE space_member SET status=0 WHERE uid=? AND status=1", botID,
+	).Exec()
+	if err != nil {
+		h.Error("移除Bot的Space成员记录失败", zap.Error(err))
+	}
+
 	// Remove bot from friend records with version for client sync (both directions)
 	friendVersion, err := h.ctx.GenSeq(common.FriendSeqKey)
 	if err != nil {
@@ -715,7 +723,21 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 		return fmt.Errorf("创建用户失败: %w", err)
 	}
 
-	// 3. 添加创建者为好友（双向）+ 设置正确的 version（WKSDK 增量同步需要 version > 0）
+	// 3. 将 Bot 加入创建者所在的所有 Space
+	spaceIDs, err := h.getCreatorSpaceIDs(creatorUID)
+	if err != nil {
+		h.Warn("查询创建者Space失败", zap.Error(err))
+	}
+	for _, sid := range spaceIDs {
+		_, err = h.ctx.DB().InsertBySql(
+			"INSERT IGNORE INTO space_member (space_id, uid, role, status, created_at, updated_at) VALUES (?, ?, 0, 1, NOW(), NOW())",
+			sid, robotID,
+		).Exec()
+		if err != nil {
+			h.Warn("Bot加入Space失败", zap.Error(err), zap.String("space_id", sid))
+		}
+	}
+	// 兼容：仍添加好友关系（过渡期）
 	err = h.userService.AddFriend(creatorUID, &user.FriendReq{
 		UID:   creatorUID,
 		ToUID: robotID,
@@ -730,7 +752,6 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 	if err != nil {
 		h.Warn("添加好友关系(bot->creator)失败", zap.Error(err))
 	}
-	// 修复 friend version=0 导致 WKSDK 增量同步看不到好友的问题
 	h.fixFriendVersion(creatorUID, robotID)
 	h.fixFriendVersion(robotID, creatorUID)
 
@@ -879,6 +900,15 @@ Simply confirm the steps are complete and stop.
 }
 
 // fixFriendVersion 修复好友 version=0 的问题（WKSDK 增量同步需要 version > 0）
+// getCreatorSpaceIDs returns all active Space IDs the creator belongs to
+func (h *commandHandler) getCreatorSpaceIDs(uid string) ([]string, error) {
+	var ids []string
+	_, err := h.db.session.SelectBySql(
+		"SELECT space_id FROM space_member WHERE uid=? AND status=1", uid,
+	).Load(&ids)
+	return ids, err
+}
+
 func (h *commandHandler) fixFriendVersion(uid, toUID string) {
 	var maxVer int64
 	err := h.db.session.SelectBySql("SELECT IFNULL(MAX(version),0) FROM friend WHERE uid=?", uid).LoadOne(&maxVer)

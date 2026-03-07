@@ -2812,10 +2812,12 @@ func (u *User) createUserWithRespAndTx(registerSpanCtx context.Context, createUs
 		u.Error("添加注册用户和文件助手为好友关系失败", zap.Error(err))
 		return nil, err
 	}
-	err = u.addBotFatherFriend(createUser.UID)
-	if err != nil {
-		u.Warn("添加注册用户和BotFather为好友关系失败", zap.Error(err))
-	}
+	// Space 模式下不再自动添加 BotFather 为好友
+	// Bot 通过 Space 成员关系自动可用
+	// err = u.addBotFatherFriend(createUser.UID)
+	// if err != nil {
+	// 	u.Warn("添加注册用户和BotFather为好友关系失败", zap.Error(err))
+	// }
 	inviteCode := ""
 	inviteUID := ""
 	vercode := ""
