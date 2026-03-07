@@ -283,8 +283,11 @@ func (s *Space) listMembers(c *wkhttp.Context) {
 	if page <= 0 {
 		page = 1
 	}
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 20
+	}
+	if limit > 10000 {
+		limit = 10000
 	}
 
 	members, err := s.db.queryMembers(spaceId, page, limit)
