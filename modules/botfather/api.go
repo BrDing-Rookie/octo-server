@@ -15,6 +15,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -347,6 +348,24 @@ func getRobotIDFromContext(c *wkhttp.Context) string {
 	return ""
 }
 
+// resolveSpaceChannelID 将裸 UID 转为 Space channel_id（DM 场景）
+// 如果 bot 和目标用户在同一 Space，返回 s{spaceId}_{channelID}
+// 否则返回原始 channelID
+func (bf *BotFather) resolveSpaceChannelID(robotID, channelID string, channelType uint8) string {
+	if channelType != common.ChannelTypePerson.Uint8() {
+		return channelID
+	}
+	// 已经是 Space 格式，不再处理
+	if strings.HasPrefix(channelID, "s") && strings.Contains(channelID, "_") {
+		return channelID
+	}
+	spaceID := space.GetCommonSpaceID(bf.ctx, robotID, channelID)
+	if spaceID != "" {
+		return fmt.Sprintf("s%s_%s", spaceID, channelID)
+	}
+	return channelID
+}
+
 // ========== Bot Register API ==========
 
 func (bf *BotFather) register(c *wkhttp.Context) {
@@ -439,12 +458,13 @@ func (bf *BotFather) sendMessage(c *wkhttp.Context) {
 	}
 
 	robotID := getRobotIDFromContext(c)
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
 	result, err := bf.ctx.SendMessageWithResult(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
 		},
 		StreamNo:    req.StreamNo,
-		ChannelID:   req.ChannelID,
+		ChannelID:   channelID,
 		ChannelType: req.ChannelType,
 		FromUID:     robotID,
 		Payload:     []byte(util.ToJson(req.Payload)),
@@ -475,16 +495,23 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 	}
 
 	robotID := getRobotIDFromContext(c)
-	// DM 场景：param.channel_id 必须是 bot 自身 UID（与正常客户端一致），
-	// 因为客户端用 param.channel_id 匹配会话，用户与 bot 的会话 channel_id = robotID
-	paramChannelID := req.ChannelID
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
+	// DM 场景：param.channel_id 必须是 bot 自身 UID（或 Space 前缀），
+	// 因为客户端用 param.channel_id 匹配会话
+	paramChannelID := channelID
 	if req.ChannelType == uint8(common.ChannelTypePerson) {
-		paramChannelID = robotID
+		// Space 模式下用 Space 前缀的 robotID
+		spaceID := space.GetCommonSpaceID(bf.ctx, robotID, req.ChannelID)
+		if spaceID != "" {
+			paramChannelID = fmt.Sprintf("s%s_%s", spaceID, robotID)
+		} else {
+			paramChannelID = robotID
+		}
 	}
 	err := bf.ctx.SendCMD(config.MsgCMDReq{
 		NoPersist:   true,
 		CMD:         common.CMDTyping,
-		ChannelID:   req.ChannelID,
+		ChannelID:   channelID,
 		ChannelType: req.ChannelType,
 		Param: map[string]interface{}{
 			"from_uid":     robotID,
@@ -514,11 +541,11 @@ func (bf *BotFather) readReceipt(c *wkhttp.Context) {
 	}
 
 	robotID := getRobotIDFromContext(c)
-	channelID := req.ChannelID
 	channelType := uint8(common.ChannelTypePerson)
 	if req.ChannelType > 0 {
 		channelType = req.ChannelType
 	}
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, channelType)
 
 	// 1. 清除会话未读角标
 	err := bf.ctx.IMClearConversationUnread(config.ClearConversationUnreadReq{
@@ -780,12 +807,13 @@ func (bf *BotFather) streamStart(c *wkhttp.Context) {
 	}
 
 	robotID := getRobotIDFromContext(c)
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
 	streamNo, err := bf.ctx.IMStreamStart(config.MessageStreamStartReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
 		},
 		FromUID:     robotID,
-		ChannelID:   req.ChannelID,
+		ChannelID:   channelID,
 		ChannelType: req.ChannelType,
 		Payload:     req.Payload,
 	})
@@ -806,9 +834,11 @@ func (bf *BotFather) streamEnd(c *wkhttp.Context) {
 		return
 	}
 
+	robotID := getRobotIDFromContext(c)
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
 	err := bf.ctx.IMStreamEnd(config.MessageStreamEndReq{
 		StreamNo:    req.StreamNo,
-		ChannelID:   req.ChannelID,
+		ChannelID:   channelID,
 		ChannelType: req.ChannelType,
 	})
 	if err != nil {

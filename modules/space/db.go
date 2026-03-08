@@ -269,6 +269,19 @@ func (d *DB) updateInvitation(code string, maxUses *int, expiresAt *time.Time) e
 	return err
 }
 
+// GetCommonSpaceID 查找两个用户共同所在的第一个 Space
+// 返回 space_id 或空字符串（无共同 Space）
+func GetCommonSpaceID(ctx *config.Context, uid1, uid2 string) string {
+	var spaceID string
+	_, _ = ctx.DB().SelectBySql(`
+		SELECT sm1.space_id FROM space_member sm1
+		INNER JOIN space_member sm2 ON sm1.space_id = sm2.space_id
+		WHERE sm1.uid=? AND sm2.uid=? AND sm1.status=1 AND sm2.status=1
+		LIMIT 1
+	`, uid1, uid2).Load(&spaceID)
+	return spaceID
+}
+
 // queryInvitationBySpaceAndCode 查询指定 Space 下的邀请码
 func (d *DB) queryInvitationBySpaceAndCode(spaceId string, code string) (*InvitationModel, error) {
 	var m InvitationModel

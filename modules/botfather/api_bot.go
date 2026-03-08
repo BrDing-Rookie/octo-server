@@ -53,9 +53,10 @@ func (bf *BotFather) syncMessages(c *wkhttp.Context) {
 		}
 	}
 
+	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
 	syncReq := config.SyncChannelMessageReq{
 		LoginUID:        robotID,
-		ChannelID:       req.ChannelID,
+		ChannelID:       channelID,
 		ChannelType:     req.ChannelType,
 		StartMessageSeq: req.StartMessageSeq,
 		EndMessageSeq:   req.EndMessageSeq,
@@ -83,13 +84,23 @@ func (bf *BotFather) getGroups(c *wkhttp.Context) {
 	type GroupInfo struct {
 		GroupNo string `json:"group_no"`
 		Name    string `json:"name"`
+		SpaceID string `json:"space_id,omitempty"`
 	}
 
+	spaceID := c.Query("space_id")
 	var groups []GroupInfo
-	_, err := bf.ctx.DB().SelectBySql(
-		"SELECT gm.group_no, g.name FROM group_member gm INNER JOIN `group` g ON gm.group_no = g.group_no WHERE gm.uid = ? AND gm.is_deleted = 0",
-		robotID,
-	).Load(&groups)
+	var err error
+	if spaceID != "" {
+		_, err = bf.ctx.DB().SelectBySql(
+			"SELECT gm.group_no, g.name, g.space_id FROM group_member gm INNER JOIN `group` g ON gm.group_no = g.group_no WHERE gm.uid = ? AND gm.is_deleted = 0 AND g.space_id = ?",
+			robotID, spaceID,
+		).Load(&groups)
+	} else {
+		_, err = bf.ctx.DB().SelectBySql(
+			"SELECT gm.group_no, g.name, g.space_id FROM group_member gm INNER JOIN `group` g ON gm.group_no = g.group_no WHERE gm.uid = ? AND gm.is_deleted = 0",
+			robotID,
+		).Load(&groups)
+	}
 	if err != nil {
 		bf.Error("查询机器人群组失败", zap.Error(err))
 		c.ResponseError(errors.New("查询群组失败"))
