@@ -15,6 +15,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -516,10 +518,21 @@ func (s *Service) downloadImage(url string, ctx context.Context) (io.ReadCloser,
 }
 
 func (s *Service) removeFile(filePaths []string) {
-	for _, url := range filePaths {
-		err := os.RemoveAll(url)
+	for _, filePath := range filePaths {
+		// Sanitize path to prevent directory traversal
+		cleanPath := filepath.Clean(filePath)
+		if cleanPath == "." || cleanPath == "/" || cleanPath == ".." {
+			s.Warn("refusing to remove dangerous path", zap.String("filePath", filePath))
+			continue
+		}
+		if strings.Contains(cleanPath, "..") {
+			s.Warn("refusing to remove path with traversal", zap.String("filePath", filePath))
+			continue
+		}
+		// Use os.Remove instead of os.RemoveAll to prevent recursive directory deletion
+		err := os.Remove(cleanPath)
 		if err != nil {
-			s.Warn("移除文件失败！", zap.String("filePath", url), zap.Error(err))
+			s.Warn("移除文件失败！", zap.String("filePath", cleanPath), zap.Error(err))
 		}
 	}
 }
