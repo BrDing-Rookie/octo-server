@@ -100,6 +100,10 @@ func (e *Event) Commit(eventID int64) {
 		e.Error("查询事件失败！", zap.Error(err), zap.Int64("eventID", eventID))
 		return
 	}
+	if eventModel == nil {
+		e.Error("事件不存在", zap.Int64("eventID", eventID))
+		return
+	}
 	// if !e.Support(eventModel.Type) {
 	// 	e.Error("不支持的事件类型！", zap.Int("eventType", eventModel.Type))
 	// 	return
