@@ -304,3 +304,13 @@ func GetUserDefaultSpaceID(ctx *config.Context, uid string) string {
 	`, uid).Load(&spaceID)
 	return spaceID
 }
+
+// GetSpaceMemberUIDs 获取指定 Space 的所有成员 UID
+func GetSpaceMemberUIDs(ctx *config.Context, spaceID string) ([]string, error) {
+	var uids []string
+	_, err := ctx.DB().SelectBySql(`
+		SELECT uid FROM space_member
+		WHERE space_id=? AND status=1
+	`, spaceID).Load(&uids)
+	return uids, err
+}
