@@ -50,6 +50,8 @@ func StartDispatcher(workerCount int64) Collector {
 			select {
 			case <-jobFinished: // job finished
 				atomic.AddInt64(&collector.jobS.Executing, -1)
+			case <-end:
+				return
 			}
 		}
 	}()
