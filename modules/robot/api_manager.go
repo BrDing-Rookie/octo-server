@@ -408,16 +408,22 @@ func (m *Manager) robotRevokeToken(c *wkhttp.Context) {
 	})
 }
 
-func randomHexStr(n int) string {
+func randomHexStr(n int) (string, error) {
 	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // generateUniqueBotToken 生成唯一的Bot Token（最多重试3次）
 func (m *Manager) generateUniqueBotToken() (string, error) {
 	for i := 0; i < 3; i++ {
-		token := "bf_" + randomHexStr(16)
+		hexStr, err := randomHexStr(16)
+		if err != nil {
+			return "", fmt.Errorf("生成随机Token失败: %w", err)
+		}
+		token := "bf_" + hexStr
 		existing, err := m.db.queryRobotByBotToken(token)
 		if err != nil {
 			return "", fmt.Errorf("检查Token唯一性失败: %w", err)
