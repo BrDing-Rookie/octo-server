@@ -30,11 +30,11 @@ func getMasterKey() []byte {
 
 // encryptKey encrypts a plaintext key using AES-256-GCM with the master key.
 // Returns base64-encoded ciphertext prefixed with "enc:".
-// If no master key is configured, returns the plaintext unchanged.
+// Returns an error if OCTO_MASTER_KEY is not configured to prevent storing plaintext secrets.
 func encryptKey(plaintext string) (string, error) {
 	masterKey := getMasterKey()
 	if masterKey == nil {
-		return plaintext, nil
+		return "", errors.New("OCTO_MASTER_KEY not configured: refusing to store unencrypted private key")
 	}
 	if len(masterKey) != 32 {
 		return "", errors.New("OCTO_MASTER_KEY must be exactly 32 bytes")
