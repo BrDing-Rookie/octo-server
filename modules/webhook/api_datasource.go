@@ -129,6 +129,25 @@ func (w *Webhook) getBlacklist(data map[string]interface{}) ([]string, error) {
 		if exist {
 			return uids, nil
 		}
+
+		// Bot 好友关系检查：如果 DM 的一方是 Bot 且另一方不是其好友，则加入黑名单
+		for i, uid := range uids {
+			isBot, err := w.db.isRobot(uid)
+			if err != nil {
+				return nil, err
+			}
+			if isBot {
+				otherUID := uids[1-i]
+				isFriend, err := w.userService.IsFriend(uid, otherUID)
+				if err != nil {
+					return nil, err
+				}
+				if !isFriend {
+					return []string{otherUID}, nil
+				}
+				break
+			}
+		}
 	}
 	modules := register.GetModules(w.ctx)
 	if len(modules) > 0 {

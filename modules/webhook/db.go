@@ -70,6 +70,13 @@ func (db *DB) GetThirdName(fromUID string, toUID string, groupNo string) (string
 	return name, remark, nameInGroup, nil
 }
 
+// isRobot 判断uid是否是启用状态的Bot
+func (db *DB) isRobot(uid string) (bool, error) {
+	var cn int
+	err := db.session.Select("count(*)").From("robot").Where("robot_id=? and status=1", uid).LoadOne(&cn)
+	return cn > 0, err
+}
+
 // GetGroupName 获取群名
 func (db *DB) GetGroupName(groupNo string) (string, error) {
 	var name string
