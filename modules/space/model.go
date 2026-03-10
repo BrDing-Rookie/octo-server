@@ -6,14 +6,15 @@ import "github.com/Mininglamp-OSS/octo-server/pkg/db"
 
 // SpaceModel 空间表模型
 type SpaceModel struct {
-	SpaceId     string // 空间ID
-	Name        string // 空间名称
-	Description string // 空间描述
-	Logo        string // 空间Logo
-	Creator     string // 创建者uid
-	MaxUsers    int    // 最大成员数 0.不限制
-	Status      int    // 状态 1.正常 0.已解散
-	Version     int64  // 版本号
+	SpaceId        string // 空间ID
+	Name           string // 空间名称
+	Description    string // 空间描述
+	Logo           string // 空间Logo
+	Creator        string // 创建者uid
+	MaxUsers       int    // 最大成员数 0.不限制
+	PresetGroupIds string // 预设群组ID列表（JSON数组）
+	Status         int    // 状态 1.正常 0.已解散
+	Version        int64  // 版本号
 	db.BaseModel
 }
 
@@ -48,9 +49,10 @@ type createSpaceReq struct {
 }
 
 type updateSpaceReq struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Logo        string `json:"logo"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Logo           string  `json:"logo"`
+	PresetGroupIds *string `json:"preset_group_ids"`
 }
 
 type addMemberReq struct {

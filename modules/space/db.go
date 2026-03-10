@@ -51,13 +51,16 @@ func (d *DB) querySpaceByID(spaceId string) (*SpaceModel, error) {
 	return &m, err
 }
 
-func (d *DB) updateSpace(spaceId string, name string, description string, logo string) error {
-	_, err := d.session.Update("space").
+func (d *DB) updateSpace(spaceId string, name string, description string, logo string, presetGroupIds *string) error {
+	builder := d.session.Update("space").
 		Set("name", name).
 		Set("description", description).
 		Set("logo", logo).
-		Set("updated_at", time.Now()).
-		Where("space_id=?", spaceId).Exec()
+		Set("updated_at", time.Now())
+	if presetGroupIds != nil {
+		builder = builder.Set("preset_group_ids", *presetGroupIds)
+	}
+	_, err := builder.Where("space_id=?", spaceId).Exec()
 	return err
 }
 

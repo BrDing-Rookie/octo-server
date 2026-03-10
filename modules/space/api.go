@@ -1,6 +1,7 @@
 package space
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -229,7 +230,7 @@ func (s *Space) updateSpace(c *wkhttp.Context) {
 		return
 	}
 
-	err = s.db.updateSpace(spaceId, req.Name, req.Description, req.Logo)
+	err = s.db.updateSpace(spaceId, req.Name, req.Description, req.Logo, req.PresetGroupIds)
 	if err != nil {
 		c.ResponseError(errors.New("更新空间失败"))
 		return
@@ -700,6 +701,52 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 	c.Response(map[string]string{
 		"space_id": invitation.SpaceId,
 	})
+
+	// 异步加入预设群组（不影响 joinSpace 结果）
+	if space.PresetGroupIds != "" {
+		go s.joinPresetGroups(loginUID, space.PresetGroupIds)
+	}
+}
+
+// joinPresetGroups 将用户加入预设群组（通过直接DB操作避免循环依赖）
+func (s *Space) joinPresetGroups(uid string, presetGroupIdsJSON string) {
+	var groupNos []string
+	if err := json.Unmarshal([]byte(presetGroupIdsJSON), &groupNos); err != nil {
+		s.Warn("解析预设群组ID失败", zap.String("preset_group_ids", presetGroupIdsJSON), zap.Error(err))
+		return
+	}
+
+	session := s.ctx.DB()
+	for _, groupNo := range groupNos {
+		if groupNo == "" {
+			continue
+		}
+		// 检查群是否存在且未解散
+		var groupStatus int
+		count, err := session.SelectBySql("SELECT status FROM `group` WHERE group_no=?", groupNo).Load(&groupStatus)
+		if err != nil || count == 0 || groupStatus != 1 {
+			s.Warn("预设群组不存在或已解散，跳过", zap.String("group_no", groupNo))
+			continue
+		}
+		// 检查用户是否已在群中
+		var memberCount int
+		_, err = session.SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=? AND is_deleted=0", groupNo, uid).Load(&memberCount)
+		if err != nil {
+			s.Warn("检查群成员失败，跳过", zap.String("group_no", groupNo), zap.Error(err))
+			continue
+		}
+		if memberCount > 0 {
+			s.Warn("用户已在群中，跳过", zap.String("group_no", groupNo), zap.String("uid", uid))
+			continue
+		}
+		// 添加成员
+		_, err = session.InsertBySql("INSERT INTO group_member (group_no, uid) VALUES (?, ?)", groupNo, uid).Exec()
+		if err != nil {
+			s.Warn("自动加入预设群组失败", zap.String("group_no", groupNo), zap.String("uid", uid), zap.Error(err))
+			continue
+		}
+		s.Info("用户已自动加入预设群组", zap.String("group_no", groupNo), zap.String("uid", uid))
+	}
 }
 
 // getInviteInfo 获取邀请信息（公开接口）
