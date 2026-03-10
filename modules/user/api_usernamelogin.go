@@ -38,6 +38,10 @@ func (u *User) usernameRegister(c *wkhttp.Context) {
 		c.Response(errors.New("密码不能为空！"))
 		return
 	}
+	if len(req.Password) < 6 {
+		c.ResponseError(errors.New("密码不能少于6位"))
+		return
+	}
 	if len(req.Username) < 8 || len(req.Username) > 22 {
 		c.ResponseError(errors.New("用户名必须在8-22位"))
 		return
