@@ -1236,6 +1236,39 @@ func (m *Message) delete(c *wkhttp.Context) {
 		}
 	}
 
+	// 验证用户对所涉频道的访问权限
+	checked := make(map[string]bool)
+	for _, req := range reqs {
+		key := fmt.Sprintf("%s-%d", req.ChannelID, req.ChannelType)
+		if checked[key] {
+			continue
+		}
+		checked[key] = true
+		if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+			isMember, err := m.groupService.ExistMember(req.ChannelID, loginUID)
+			if err != nil {
+				m.Error("查询群成员失败", zap.Error(err))
+				c.ResponseError(errors.New("查询群成员失败"))
+				return
+			}
+			if !isMember {
+				c.ResponseError(errors.New("非频道成员，无权操作"))
+				return
+			}
+		} else if req.ChannelType == common.ChannelTypePerson.Uint8() && req.ChannelID != loginUID {
+			isFriend, err := m.userService.IsFriend(loginUID, req.ChannelID)
+			if err != nil {
+				m.Error("查询好友关系失败", zap.Error(err))
+				c.ResponseError(errors.New("查询好友关系失败"))
+				return
+			}
+			if !isFriend {
+				c.ResponseError(errors.New("非会话参与者，无权操作"))
+				return
+			}
+		}
+	}
+
 	tx, err := m.ctx.DB().Begin()
 	if err != nil {
 		m.Error("开启事务失败！", zap.Error(err))
