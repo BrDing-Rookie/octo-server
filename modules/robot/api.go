@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"os"
@@ -175,7 +176,7 @@ func (rb *Robot) authRobot() wkhttp.HandlerFunc {
 			})
 			return
 		}
-		if appM.AppKey != appKey {
+		if !hmac.Equal([]byte(appM.AppKey), []byte(appKey)) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "appKey不正确！",
 			})
