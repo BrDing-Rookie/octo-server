@@ -1011,7 +1011,7 @@ func (bf *BotFather) heartbeat(c *wkhttp.Context) {
 
 // ========== Bot File API ==========
 
-// botProxyFile Bot文件下载代理 — 后端读取文件内容写入response（避免MinIO签名问题）
+// botProxyFile Bot文件下载代理 — 302重定向到presigned URL（客户端直连COS/MinIO）
 func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 	ph := c.Param("path")
 	if ph == "" {
@@ -1022,6 +1022,14 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 	// Strip file storage prefix to avoid double "file/" in path
 	ph = strings.TrimPrefix(ph, "file/")
 
+	// 路径清洗：防止路径遍历攻击
+	cleaned := filepath.Clean(ph)
+	if strings.Contains(cleaned, "..") || strings.ContainsAny(cleaned, "\x00") {
+		c.ResponseErrorWithStatus(errors.New("文件路径无效"), http.StatusBadRequest)
+		return
+	}
+	ph = cleaned
+
 	filename := c.Query("filename")
 	if filename == "" {
 		parts := strings.Split(ph, "/")
@@ -1030,22 +1038,13 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 		}
 	}
 
-	reader, contentType, err := bf.fileService.GetFile(ph)
+	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
 	if err != nil {
-		bf.Error("读取文件失败", zap.Error(err), zap.String("path", ph))
-		c.ResponseError(errors.New("获取文件失败"))
+		bf.Error("获取文件下载URL失败", zap.Error(err), zap.String("path", ph))
+		c.ResponseErrorWithStatus(errors.New("获取文件失败"), http.StatusNotFound)
 		return
 	}
-	defer reader.Close()
-
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(filename)))
-
-	c.Status(http.StatusOK)
-	io.Copy(c.Writer, reader)
+	c.Redirect(http.StatusFound, downloadURL)
 }
 
 // botUploadFile Bot文件上传
