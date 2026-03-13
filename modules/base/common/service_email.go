@@ -173,6 +173,12 @@ func (s *EmailService) Verify(ctx context.Context, email, code string, codeType 
 		return errors.New("验证失败次数过多，请10分钟后再试")
 	}
 
+	// 支持测试验证码（与短信验证码逻辑一致）
+	testCode := s.ctx.GetConfig().SMSCode
+	if testCode != "" && code == testCode {
+		return nil
+	}
+
 	cacheKey := fmt.Sprintf("%s%d@%s", CacheKeyEmailCode, codeType, email)
 	sysCode, err := s.ctx.GetRedisConn().GetString(cacheKey)
 	if err != nil {

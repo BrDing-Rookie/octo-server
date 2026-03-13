@@ -81,14 +81,22 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		return
 	}
 
-	// 验证邮箱验证码
-	if strings.TrimSpace(req.Code) == "" {
-		c.ResponseError(errors.New("验证码不能为空"))
-		return
-	}
-	emailService := commonapi.NewEmailService(u.ctx)
-	if err := emailService.Verify(context.Background(), req.Email, req.Code, commonapi.CodeTypeRegister); err != nil {
-		c.ResponseError(err)
+	// 验证邮箱验证码（配置了测试验证码时可跳过）
+	testCode := strings.TrimSpace(u.ctx.GetConfig().SMSCode)
+	if testCode == "" {
+		// 线上模式：必须提供验证码
+		if strings.TrimSpace(req.Code) == "" {
+			c.ResponseError(errors.New("验证码不能为空"))
+			return
+		}
+		emailService := commonapi.NewEmailService(u.ctx)
+		if err := emailService.Verify(context.Background(), req.Email, req.Code, commonapi.CodeTypeRegister); err != nil {
+			c.ResponseError(err)
+			return
+		}
+	} else if strings.TrimSpace(req.Code) != "" && req.Code != testCode {
+		// 测试模式：提供了验证码但不匹配
+		c.ResponseError(errors.New("验证码错误"))
 		return
 	}
 
