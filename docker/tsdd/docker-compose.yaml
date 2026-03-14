@@ -10,6 +10,7 @@ services:
     volumes:
       - ./configs/wk.yaml:/root/wukongim/wk.yaml
       - ./logs/wk:/root/wukongim/logs
+      - ./wkdata:/root/wukongim/data  # 持久化会话/消息数据，防止recreate丢失
   octo-server:  # DMWork的业务服务
     build:
       context: ../..
