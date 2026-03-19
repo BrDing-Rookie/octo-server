@@ -108,6 +108,14 @@ func (bf *BotFather) sendWelcomeMessage(toUID string, spaceID string) error {
 	channelID := toUID
 
 	// Send message via IM
+	payload := map[string]interface{}{
+		"type":    common.Text,
+		"content": welcomeContent,
+	}
+	// 写入 space_id，前端按当前 Space 过滤 BotFather 聊天历史
+	if spaceID != "" {
+		payload["space_id"] = spaceID
+	}
 	_, err := bf.ctx.SendMessageWithResult(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
@@ -115,10 +123,7 @@ func (bf *BotFather) sendWelcomeMessage(toUID string, spaceID string) error {
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypePerson.Uint8(),
 		FromUID:     BotFatherUID,
-		Payload: []byte(util.ToJson(map[string]interface{}{
-			"type":    common.Text,
-			"content": welcomeContent,
-		})),
+		Payload:     []byte(util.ToJson(payload)),
 	})
 
 	return err
