@@ -1037,6 +1037,14 @@ func (h *commandHandler) reply(toUID string, content string) {
 	if sp := getSpacePrefix(toUID); sp != "" {
 		fromUID = sp + BotFatherUID
 	}
+	payload := map[string]interface{}{
+		"content": content,
+		"type":    common.Text,
+	}
+	// 写入 space_id，前端按当前 Space 过滤 BotFather 聊天历史
+	if spaceID := h.resolveSpaceID(toUID); spaceID != "" {
+		payload["space_id"] = spaceID
+	}
 	h.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
@@ -1044,10 +1052,7 @@ func (h *commandHandler) reply(toUID string, content string) {
 		FromUID:     fromUID,
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypePerson.Uint8(),
-		Payload: []byte(util.ToJson(map[string]interface{}{
-			"content": content,
-			"type":    common.Text,
-		})),
+		Payload:     []byte(util.ToJson(payload)),
 	})
 }
 
