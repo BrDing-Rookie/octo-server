@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -26,6 +27,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
+	"github.com/gocraft/dbr/v2"
+	sts "github.com/tencentyun/qcloud-cos-sts-sdk/go"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
@@ -108,6 +111,8 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.POST("/file/upload", bf.botUploadFile)
 		botAPI.POST("/upload", bf.botUploadFile) // 兼容旧路径 (/v1/bot/upload)
 		botAPI.GET("/file/download/*path", bf.botFileDownload)
+		botAPI.GET("/upload/credentials", bf.botUploadCredentials) // STS 临时密钥签发
+		botAPI.POST("/message/edit", bf.botMessageEdit)            // Bot 编辑消息
 	}
 
 	// Bot File API（独立路由组，避免 GIN wildcard 冲突）
@@ -1261,4 +1266,193 @@ func (bf *BotFather) syncAllBotTokens() {
 		successCount++
 	}
 	bf.Info("Bot token 启动同步完成", zap.Int("total", len(robots)), zap.Int("success", successCount))
+}
+
+// botUploadCredentials 签发 STS 临时密钥，供客户端直传 COS（/v1/bot/upload/credentials）
+func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
+	filename := c.Query("filename")
+	if strings.TrimSpace(filename) == "" {
+		c.ResponseError(errors.New("filename 不能为空"))
+		return
+	}
+
+	cosConfig := bf.ctx.GetConfig().COS
+	if cosConfig.SecretID == "" || cosConfig.SecretKey == "" || cosConfig.Bucket == "" {
+		bf.Error("COS 配置不完整")
+		c.ResponseError(errors.New("COS 未配置"))
+		return
+	}
+
+	// 生成对象 key：{prefix}/chat/{timestamp}/{random}_{filename}
+	prefix := strings.TrimSpace(cosConfig.Prefix)
+	objectPath := fmt.Sprintf("chat/%d/%s_%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	var key string
+	if prefix != "" {
+		key = path.Join(prefix, objectPath)
+	} else {
+		key = objectPath
+	}
+
+	bucket := cosConfig.Bucket
+	region := cosConfig.Region
+
+	// 从 bucket 名中提取 appId（格式：bucketname-appid）
+	appId := ""
+	if idx := strings.LastIndex(bucket, "-"); idx > 0 {
+		appId = bucket[idx+1:]
+	}
+	if appId == "" {
+		bf.Error("无法从 bucket 名称中提取 appId", zap.String("bucket", bucket))
+		c.ResponseError(errors.New("COS 配置错误：bucket 格式不正确"))
+		return
+	}
+
+	// 使用 STS SDK 生成临时密钥
+	client := sts.NewClient(cosConfig.SecretID, cosConfig.SecretKey, nil)
+	opt := &sts.CredentialOptions{
+		DurationSeconds: 1800,
+		Region:          region,
+		Policy: &sts.CredentialPolicy{
+			Statement: []sts.CredentialPolicyStatement{
+				{
+					Action: []string{"cos:PutObject"},
+					Effect: "allow",
+					Resource: []string{
+						fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", region, appId, bucket, key),
+					},
+				},
+			},
+		},
+	}
+
+	res, err := client.GetCredential(opt)
+	if err != nil {
+		bf.Error("获取 STS 临时密钥失败", zap.Error(err))
+		c.ResponseError(errors.New("获取临时密钥失败"))
+		return
+	}
+
+	c.Response(gin.H{
+		"bucket": bucket,
+		"region": region,
+		"key":    key,
+		"credentials": gin.H{
+			"tmpSecretId":  res.Credentials.TmpSecretID,
+			"tmpSecretKey": res.Credentials.TmpSecretKey,
+			"sessionToken": res.Credentials.SessionToken,
+		},
+		"startTime":   res.StartTime,
+		"expiredTime": res.ExpiredTime,
+		"cdnBaseUrl":  cosConfig.BucketURL,
+	})
+}
+
+// botMessageEdit Bot 编辑自己发送的消息（/v1/bot/message/edit）
+func (bf *BotFather) botMessageEdit(c *wkhttp.Context) {
+	var req struct {
+		MessageID   string `json:"message_id"`
+		MessageSeq  uint32 `json:"message_seq"`
+		ChannelID   string `json:"channel_id"`
+		ChannelType uint8  `json:"channel_type"`
+		ContentEdit string `json:"content_edit"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		bf.Error("数据格式有误！", zap.Error(err))
+		c.ResponseError(errors.New("数据格式有误！"))
+		return
+	}
+	if req.MessageID == "" {
+		c.ResponseError(errors.New("message_id 不能为空"))
+		return
+	}
+	if req.MessageSeq == 0 {
+		c.ResponseError(errors.New("message_seq 不能为空"))
+		return
+	}
+	if req.ChannelID == "" {
+		c.ResponseError(errors.New("channel_id 不能为空"))
+		return
+	}
+	if strings.TrimSpace(req.ContentEdit) == "" {
+		c.ResponseError(errors.New("content_edit 不能为空"))
+		return
+	}
+
+	robotID := getRobotIDFromContext(c)
+	if robotID == "" {
+		c.ResponseError(errors.New("robot_id 不能为空"))
+		return
+	}
+
+	// 权限检查：只允许 Bot 编辑自己发送的消息
+	messageSeqs := []uint32{req.MessageSeq}
+	resp, err := bf.ctx.IMGetWithChannelAndSeqs(req.ChannelID, req.ChannelType, robotID, messageSeqs)
+	if err != nil {
+		bf.Error("查询消息错误", zap.Error(err))
+		c.ResponseError(errors.New("查询消息错误"))
+		return
+	}
+	if resp == nil || len(resp.Messages) == 0 {
+		c.ResponseError(errors.New("消息不存在"))
+		return
+	}
+	if resp.Messages[0].FromUID != robotID {
+		c.ResponseError(errors.New("只能编辑自己发送的消息"))
+		return
+	}
+
+	// 检查是否存在相同编辑内容
+	contentEdit := dbr.NewNullString(req.ContentEdit).String
+	contentMD5 := util.MD5(contentEdit)
+
+	var existCount int
+	err = bf.ctx.DB().Select("count(*)").From("message_extra").Where("message_id=? and content_edit_hash=?", req.MessageID, contentMD5).LoadOne(&existCount)
+	if err != nil {
+		bf.Error("查询是否存在相同正文失败！", zap.Error(err))
+		c.ResponseError(errors.New("查询是否存在相同正文失败！"))
+		return
+	}
+	if existCount > 0 {
+		c.ResponseOK()
+		return
+	}
+
+	// 计算 fakeChannelID（私聊时需要）
+	fakeChannelID := req.ChannelID
+	if req.ChannelType == common.ChannelTypePerson.Uint8() {
+		fakeChannelID = common.GetFakeChannelIDWith(robotID, req.ChannelID)
+	}
+
+	// 生成 message_extra 版本号
+	version, err := bf.ctx.GenSeq(fmt.Sprintf("%s:%s", common.MessageExtraSeqKey, fakeChannelID))
+	if err != nil {
+		bf.Error("生成消息扩展序列号失败！", zap.Error(err))
+		c.ResponseError(errors.New("生成消息扩展序列号失败！"))
+		return
+	}
+
+	// 写入 message_extra
+	_, err = bf.ctx.DB().InsertBySql(
+		"INSERT INTO message_extra (message_id,message_seq,channel_id,channel_type,content_edit,content_edit_hash,edited_at,version) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE content_edit=VALUES(content_edit),content_edit_hash=VALUES(content_edit_hash),edited_at=VALUES(edited_at),version=VALUES(version)",
+		req.MessageID, req.MessageSeq, fakeChannelID, req.ChannelType, contentEdit, contentMD5, int(time.Now().Unix()), version,
+	).Exec()
+	if err != nil {
+		bf.Error("添加或修改编辑内容失败！", zap.Error(err))
+		c.ResponseError(errors.New("添加或修改编辑内容失败！"))
+		return
+	}
+
+	// 发送 CMD 同步消息扩展到客户端
+	err = bf.ctx.SendCMD(config.MsgCMDReq{
+		NoPersist:   true,
+		ChannelID:   req.ChannelID,
+		ChannelType: req.ChannelType,
+		FromUID:     robotID,
+		CMD:         common.CMDSyncMessageExtra,
+	})
+	if err != nil {
+		bf.Error("发送 CMD 同步失败！", zap.Error(err))
+	}
+
+	c.ResponseOK()
 }
