@@ -1,10 +1,14 @@
 package space
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 )
+
+// spaceChannelRe matches the space prefix: "s" + 32 hex chars + "_"
+var spaceChannelRe = regexp.MustCompile(`^s([0-9a-f]{32})_`)
 
 const SpaceChannelPrefix = "s"
 
@@ -36,7 +40,7 @@ func BuildChannelID(spaceID, peerID string) string {
 }
 
 // ParseChannelID 从 channel_id 解析 space_id 和 peer_id
-// 优先用已知 spaceId 列表做最长前缀匹配，回退用 LastIndex
+// 优先用已知 spaceId 列表做快速匹配，回退用正则 s[0-9a-f]{32}_ 精确匹配
 func ParseChannelID(channelID string) (spaceID, peerID string) {
 	if !strings.HasPrefix(channelID, SpaceChannelPrefix) {
 		return "", channelID
@@ -54,9 +58,10 @@ func ParseChannelID(channelID string) (spaceID, peerID string) {
 		}
 	}
 
-	// 回退：LastIndex（适用于 peerID 不含下划线的情况）
-	if idx := strings.LastIndex(rest, "_"); idx > 0 {
-		return rest[:idx], rest[idx+1:]
+	// 回退：正则精确匹配 s + 32位hex + _
+	if m := spaceChannelRe.FindStringSubmatchIndex(channelID); m != nil {
+		// m[2]:m[3] is the capture group (32 hex chars)
+		return channelID[m[2]:m[3]], channelID[m[1]:]
 	}
 	return "", channelID
 }
