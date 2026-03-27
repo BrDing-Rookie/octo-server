@@ -1052,6 +1052,45 @@ func (f *Friend) friendSync(c *wkhttp.Context) {
 func (f *Friend) friendSearch(c *wkhttp.Context) {
 	uid := c.MustGet("uid").(string)
 	keyword := c.Query("keyword")
+	spaceID := c.Query("space_id")
+
+	// Space 模式：从 space_member 表搜索，而非 friend 表
+	if spaceID != "" {
+		memberUIDs, err := space.GetSpaceMemberUIDs(f.ctx, spaceID)
+		if err != nil {
+			f.Error("获取 Space 成员失败！", zap.Error(err))
+			c.ResponseError(errors.New("获取 Space 成员失败！"))
+			return
+		}
+		// 排除自己
+		filteredUIDs := make([]string, 0, len(memberUIDs))
+		for _, m := range memberUIDs {
+			if m != uid {
+				filteredUIDs = append(filteredUIDs, m)
+			}
+		}
+		userDetails, err := f.userService.GetUserDetails(filteredUIDs, c.GetLoginUID())
+		if err != nil {
+			f.Error("获取用户详情失败！", zap.Error(err))
+			c.ResponseError(errors.New("获取用户详情失败！"))
+			return
+		}
+		resps := make([]*friendResp, 0, len(userDetails))
+		for _, userDetail := range userDetails {
+			// keyword 过滤
+			if keyword != "" && !strings.Contains(strings.ToLower(userDetail.Name), strings.ToLower(keyword)) {
+				continue
+			}
+			resp := &friendResp{}
+			resp.UserDetailResp = *userDetail
+			resp.Version = 1
+			resps = append(resps, resp)
+		}
+		c.JSON(http.StatusOK, resps)
+		return
+	}
+
+	// 非 Space 模式：原有 friend 表查询
 	friends, err := f.db.QueryFriendsWithKeyword(uid, keyword)
 	if err != nil {
 		f.Error("查询好友数据失败！", zap.Error(err))
