@@ -209,3 +209,62 @@ func TestFillPersonSpaceUnread_NoRawConversation(t *testing.T) {
 	fillPersonSpaceUnread(convs, rawConvs, "spaceA", "me", nil)
 	assert.Nil(t, convs[0].SpaceUnread)
 }
+
+func TestFindSpaceLastMessage_Basic(t *testing.T) {
+	recents := []*MsgSyncResp{
+		{MessageSeq: 1, Payload: map[string]interface{}{"content": "msg1", "space_id": "spaceA"}},
+		{MessageSeq: 2, Payload: map[string]interface{}{"content": "msg2", "space_id": "spaceB"}},
+		{MessageSeq: 3, Payload: map[string]interface{}{"content": "msg3", "space_id": "spaceA"}},
+	}
+
+	// spaceA 的最后一条是 seq=3
+	result := findSpaceLastMessage(recents, "spaceA")
+	assert.NotNil(t, result)
+	assert.Equal(t, uint32(3), result.MessageSeq)
+
+	// spaceB 的最后一条是 seq=2
+	result = findSpaceLastMessage(recents, "spaceB")
+	assert.NotNil(t, result)
+	assert.Equal(t, uint32(2), result.MessageSeq)
+
+	// spaceC 没有消息
+	result = findSpaceLastMessage(recents, "spaceC")
+	assert.Nil(t, result)
+}
+
+func TestFindSpaceLastMessage_EmptyRecents(t *testing.T) {
+	assert.Nil(t, findSpaceLastMessage(nil, "spaceA"))
+	assert.Nil(t, findSpaceLastMessage([]*MsgSyncResp{}, "spaceA"))
+}
+
+func TestFindSpaceLastMessage_NilPayload(t *testing.T) {
+	recents := []*MsgSyncResp{
+		{MessageSeq: 1, Payload: nil},
+		{MessageSeq: 2, Payload: map[string]interface{}{"content": "no space"}},
+	}
+	assert.Nil(t, findSpaceLastMessage(recents, "spaceA"))
+}
+
+func TestFillPersonSpaceUnread_SetsSpaceLastMessage(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{
+			ChannelID:   "user1",
+			ChannelType: common.ChannelTypePerson.Uint8(),
+			Unread:      0,
+			Recents: []*MsgSyncResp{
+				{MessageSeq: 1, Payload: map[string]interface{}{"content": "111", "space_id": "spaceA"}},
+				{MessageSeq: 2, Payload: map[string]interface{}{"content": "222", "space_id": "spaceB"}},
+			},
+		},
+	}
+
+	fillPersonSpaceUnread(convs, nil, "spaceA", "login", nil)
+
+	// SpaceLastMessage 应为 spaceA 的消息 "111"
+	assert.NotNil(t, convs[0].SpaceLastMessage)
+	assert.Equal(t, uint32(1), convs[0].SpaceLastMessage.MessageSeq)
+	assert.Equal(t, "111", convs[0].SpaceLastMessage.Payload["content"])
+
+	// SpaceUnread 未设置（unread=0）
+	assert.Nil(t, convs[0].SpaceUnread)
+}
