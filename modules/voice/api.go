@@ -73,7 +73,15 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 
 	contextText := c.Request.FormValue("context_text")
 
-	text, model, err := v.service.Transcribe(audioData, mimeType, contextText)
+	chatContext := c.Request.FormValue("chat_context")
+	if len(chatContext) > maxChatContextLength {
+		v.Warn("chat_context exceeds max length, truncating to last characters",
+			zap.Int("original_length", len(chatContext)),
+			zap.Int("max_length", maxChatContextLength))
+		chatContext = chatContext[len(chatContext)-maxChatContextLength:]
+	}
+
+	text, model, err := v.service.Transcribe(audioData, mimeType, contextText, chatContext)
 	if err != nil {
 		v.Error("transcription failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{

@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	defaultTimeout      = 30
-	defaultTotalTimeout = 45
-	defaultMaxDuration  = 60
-	defaultMaxFileSize  = 5 * 1024 * 1024 // 5MB
+	defaultTimeout       = 30
+	defaultTotalTimeout  = 45
+	defaultMaxDuration   = 60
+	defaultMaxFileSize   = 5 * 1024 * 1024 // 5MB
+	maxChatContextLength = 10000           // max chat_context characters
 )
 
 var defaultModels = []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro"}

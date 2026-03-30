@@ -29,8 +29,8 @@ func NewVoiceService(cfg *VoiceConfig) *VoiceService {
 
 // Transcribe transcribes audio data using the configured model fallback chain.
 // Returns the transcribed text, the model used, or an error.
-func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText string) (string, string, error) {
-	prompt := buildPrompt(contextText)
+func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
+	prompt := buildPrompt(contextText, chatContext)
 
 	totalCtx, totalCancel := context.WithTimeout(context.Background(), time.Duration(s.config.TotalTimeout)*time.Second)
 	defer totalCancel()

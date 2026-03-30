@@ -45,7 +45,7 @@ func TestTranscribe_Success_FirstModel(t *testing.T) {
 	cfg := newTestConfig(server.URL)
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello world", text)
 	assert.Equal(t, "model-a", model)
@@ -80,7 +80,7 @@ func TestTranscribe_FallbackToSecondModel(t *testing.T) {
 	cfg := newTestConfig(server.URL)
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "Fallback result", text)
 	assert.Equal(t, "model-b", model)
@@ -98,7 +98,7 @@ func TestTranscribe_NoRetryOn4xx(t *testing.T) {
 	cfg := newTestConfig(server.URL)
 	svc := NewVoiceService(cfg)
 
-	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.Error(t, err)
 	// Should not retry on 400 - only 1 call
 	assert.Equal(t, int32(1), atomic.LoadInt32(&callCount))
@@ -126,7 +126,7 @@ func TestTranscribe_RetryOn429(t *testing.T) {
 	cfg := newTestConfig(server.URL)
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "Finally!", text)
 	assert.Equal(t, "model-c", model)
@@ -143,7 +143,7 @@ func TestTranscribe_AllModelsFail(t *testing.T) {
 	cfg := newTestConfig(server.URL)
 	svc := NewVoiceService(cfg)
 
-	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "all models failed")
 }
@@ -166,7 +166,7 @@ func TestTranscribe_TotalTimeout(t *testing.T) {
 	svc := NewVoiceService(cfg)
 
 	start := time.Now()
-	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	elapsed := time.Since(start)
 
 	assert.Error(t, err)
@@ -186,7 +186,7 @@ func TestTranscribe_EmptyResponse(t *testing.T) {
 	cfg.Models = []string{"model-a"}
 	svc := NewVoiceService(cfg)
 
-	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "")
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "empty response")
 }
@@ -213,9 +213,64 @@ func TestTranscribe_WithContextText(t *testing.T) {
 	cfg.Models = []string{"model-a"}
 	svc := NewVoiceService(cfg)
 
-	text, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "existing text here")
+	text, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "existing text here", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "modified text", text)
+}
+
+func TestTranscribe_WithChatContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		prompt := req.Messages[0].Content[0].Text
+		assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+		assert.Contains(t, prompt, "Alice: 周五开会")
+		assert.Contains(t, prompt, "准确转写为文字")
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "transcribed with context"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "Alice: 周五开会")
+	assert.NoError(t, err)
+	assert.Equal(t, "transcribed with context", text)
+}
+
+func TestTranscribe_WithChatContextAndContextText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		prompt := req.Messages[0].Content[0].Text
+		assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+		assert.Contains(t, prompt, "chat history here")
+		assert.Contains(t, prompt, "已有文本")
+		assert.Contains(t, prompt, "existing draft")
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "modified with context"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "existing draft", "chat history here")
+	assert.NoError(t, err)
+	assert.Equal(t, "modified with context", text)
 }
 
 func TestMimeTypeToFormat(t *testing.T) {

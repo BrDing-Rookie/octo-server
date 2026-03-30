@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -40,7 +41,16 @@ func setupTestRouter(cfg *VoiceConfig, litellmURL string) *wkhttp.WKHttp {
 	return r
 }
 
+type multipartOpts struct {
+	contextText string
+	chatContext string
+}
+
 func createMultipartRequest(t *testing.T, path string, audioData []byte, contextText string) *http.Request {
+	return createMultipartRequestWithOpts(t, path, audioData, multipartOpts{contextText: contextText})
+}
+
+func createMultipartRequestWithOpts(t *testing.T, path string, audioData []byte, opts multipartOpts) *http.Request {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -49,8 +59,13 @@ func createMultipartRequest(t *testing.T, path string, audioData []byte, context
 	_, err = part.Write(audioData)
 	assert.NoError(t, err)
 
-	if contextText != "" {
-		err = writer.WriteField("context_text", contextText)
+	if opts.contextText != "" {
+		err = writer.WriteField("context_text", opts.contextText)
+		assert.NoError(t, err)
+	}
+
+	if opts.chatContext != "" {
+		err = writer.WriteField("chat_context", opts.chatContext)
 		assert.NoError(t, err)
 	}
 
@@ -303,4 +318,127 @@ func TestTranscribeAPI_AudioRequestFormat(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestTranscribeAPI_WithChatContext(t *testing.T) {
+	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		prompt := req.Messages[0].Content[0].Text
+		assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+		assert.Contains(t, prompt, "Alice: 明天开会")
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "OK with chat context"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer litellmServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   litellmServer.URL,
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Models:       []string{"test-model"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+	w := httptest.NewRecorder()
+	req := createMultipartRequestWithOpts(t, "/v1/voice/transcribe", []byte("fake-audio"), multipartOpts{
+		chatContext: "Alice: 明天开会",
+	})
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "OK with chat context", resp["text"])
+}
+
+func TestTranscribeAPI_ChatContextTruncation(t *testing.T) {
+	var receivedPrompt string
+	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		receivedPrompt = req.Messages[0].Content[0].Text
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "OK"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer litellmServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   litellmServer.URL,
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Models:       []string{"test-model"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	// Create chat context that exceeds maxChatContextLength
+	longPrefix := strings.Repeat("A", 5000) // will be truncated away
+	longSuffix := strings.Repeat("B", maxChatContextLength)
+	longChatContext := longPrefix + longSuffix
+	assert.True(t, len(longChatContext) > maxChatContextLength)
+
+	router := setupTestRouter(cfg, "")
+	w := httptest.NewRecorder()
+	req := createMultipartRequestWithOpts(t, "/v1/voice/transcribe", []byte("fake-audio"), multipartOpts{
+		chatContext: longChatContext,
+	})
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// The truncated context should contain only the suffix (last maxChatContextLength chars)
+	assert.Contains(t, receivedPrompt, longSuffix)
+	assert.NotContains(t, receivedPrompt, longPrefix)
+}
+
+func TestTranscribeAPI_EmptyChatContext(t *testing.T) {
+	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		prompt := req.Messages[0].Content[0].Text
+		assert.NotContains(t, prompt, "以下是当前聊天的最近对话记录")
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "plain transcription"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer litellmServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   litellmServer.URL,
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Models:       []string{"test-model"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+	w := httptest.NewRecorder()
+	// No chat_context field at all
+	req := createMultipartRequest(t, "/v1/voice/transcribe", []byte("fake-audio"), "")
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "plain transcription", resp["text"])
 }
