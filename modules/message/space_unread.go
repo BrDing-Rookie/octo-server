@@ -155,9 +155,12 @@ func findSpaceLastMessageFallback(
 		return nil
 	}
 
-	// 从最新到最旧遍历，找第一条匹配的
+	// 从最新到最旧遍历，找第一条匹配的（跳过已删除消息）
 	for i := len(resp.Messages) - 1; i >= 0; i-- {
 		msg := resp.Messages[i]
+		if msg.IsDeleted == 1 {
+			continue
+		}
 		payloadMap, err := msg.GetPayloadMap()
 		if err != nil || payloadMap == nil {
 			continue
@@ -169,7 +172,8 @@ func findSpaceLastMessageFallback(
 	return nil
 }
 
-// msgRespToSyncResp 将 config.MessageResp 转换为 MsgSyncResp（简化版，仅用于预览）。
+// msgRespToSyncResp 将 config.MessageResp 转换为 MsgSyncResp（用于预览）。
+// 包含 IsDeleted、Revoke、Setting 等前端渲染所需字段。
 func msgRespToSyncResp(msg *config.MessageResp) *MsgSyncResp {
 	payloadMap, _ := msg.GetPayloadMap()
 	return &MsgSyncResp{
@@ -182,6 +186,8 @@ func msgRespToSyncResp(msg *config.MessageResp) *MsgSyncResp {
 		ChannelID:    msg.ChannelID,
 		ChannelType:  msg.ChannelType,
 		Timestamp:    msg.Timestamp,
+		Setting:      msg.Setting,
+		IsDeleted:    msg.IsDeleted,
 		Payload:      payloadMap,
 	}
 }
