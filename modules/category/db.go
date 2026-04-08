@@ -48,25 +48,17 @@ func (d *categoryDB) countCategoriesByUIDAndSpaceID(uid, spaceID string) (int, e
 	return count, err
 }
 
+func (d *categoryDB) maxSortByUIDAndSpaceID(uid, spaceID string) (int, error) {
+	var maxSort int
+	_, err := d.session.Select("IFNULL(max(sort),-1)").From("group_category").
+		Where("uid=? and space_id=? and status=1", uid, spaceID).
+		Load(&maxSort)
+	return maxSort, err
+}
+
 func (d *categoryDB) updateCategoryName(categoryID, name string) error {
 	_, err := d.session.Update("group_category").
 		Set("name", name).
-		Where("category_id=?", categoryID).
-		Exec()
-	return err
-}
-
-func (d *categoryDB) deleteCategory(categoryID string) error {
-	_, err := d.session.Update("group_category").
-		Set("status", 2).
-		Where("category_id=?", categoryID).
-		Exec()
-	return err
-}
-
-func (d *categoryDB) updateCategorySort(categoryID string, sort int) error {
-	_, err := d.session.Update("group_category").
-		Set("sort", sort).
 		Where("category_id=?", categoryID).
 		Exec()
 	return err

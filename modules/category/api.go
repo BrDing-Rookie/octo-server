@@ -70,6 +70,10 @@ func (c *Category) create(ctx *wkhttp.Context) {
 		ctx.ResponseError(errors.New("类别名称不能为空"))
 		return
 	}
+	if len([]rune(req.Name)) > 100 {
+		ctx.ResponseError(errors.New("类别名称不能超过100个字符"))
+		return
+	}
 
 	count, err := c.db.countCategoriesByUIDAndSpaceID(loginUID, spaceID)
 	if err != nil {
@@ -83,12 +87,19 @@ func (c *Category) create(ctx *wkhttp.Context) {
 	}
 
 	categoryID := util.GenerUUID()
+	nextSort, err := c.db.maxSortByUIDAndSpaceID(loginUID, spaceID)
+	if err != nil {
+		c.Error("查询排序值失败", zap.Error(err))
+		ctx.ResponseError(errors.New("创建类别失败"))
+		return
+	}
+	nextSort++
 	err = c.db.insertCategory(&CategoryModel{
 		CategoryID: categoryID,
 		SpaceID:    spaceID,
 		UID:        loginUID,
 		Name:       req.Name,
-		Sort:       count,
+		Sort:       nextSort,
 		Status:     1,
 	})
 	if err != nil {
@@ -100,7 +111,7 @@ func (c *Category) create(ctx *wkhttp.Context) {
 	ctx.Response(categoryResp{
 		CategoryID: &categoryID,
 		Name:       req.Name,
-		Sort:       count,
+		Sort:       nextSort,
 		Groups:     make([]groupInCategoryResp, 0),
 	})
 }
@@ -207,6 +218,10 @@ func (c *Category) update(ctx *wkhttp.Context) {
 	}
 	if req.Name == "" {
 		ctx.ResponseError(errors.New("类别名称不能为空"))
+		return
+	}
+	if len([]rune(req.Name)) > 100 {
+		ctx.ResponseError(errors.New("类别名称不能超过100个字符"))
 		return
 	}
 
@@ -320,7 +335,13 @@ func (c *Category) sort(ctx *wkhttp.Context) {
 	for _, cat := range categories {
 		catMap[cat.CategoryID] = true
 	}
+	seen := make(map[string]bool, len(req.CategoryIDs))
 	for _, id := range req.CategoryIDs {
+		if seen[id] {
+			ctx.ResponseError(errors.New("分类列表存在重复"))
+			return
+		}
+		seen[id] = true
 		if !catMap[id] {
 			ctx.ResponseError(errors.New("分类不存在或无权限"))
 			return

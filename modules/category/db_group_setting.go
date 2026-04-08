@@ -26,15 +26,6 @@ func (d *categoryDB) updateGroupSettingCategory(id int64, categoryID *string, ca
 	return err
 }
 
-func (d *categoryDB) clearCategoryFromGroupSettings(categoryID, uid string) error {
-	_, err := d.session.Update("group_setting").
-		Set("category_id", nil).
-		Set("category_sort", 0).
-		Where("category_id=? and uid=?", categoryID, uid).
-		Exec()
-	return err
-}
-
 func (d *categoryDB) queryUserGroupsInSpace(uid, spaceID string) ([]*userGroupInfo, error) {
 	var results []*userGroupInfo
 	_, err := d.session.SelectBySql(`
