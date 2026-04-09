@@ -304,6 +304,15 @@ func (bf *BotFather) updateGroupMd(c *wkhttp.Context) {
 	})
 }
 
+// resolveBotDisplayName 查询 Bot 的显示名，查不到时 fallback 到 robotID
+func (bf *BotFather) resolveBotDisplayName(robotID string) string {
+	botUser, err := bf.userDB.QueryByUID(robotID)
+	if err == nil && botUser != nil && botUser.Name != "" {
+		return botUser.Name
+	}
+	return robotID
+}
+
 // ========== Space Members API ==========
 
 // botSpaceMembers 查询 Bot 所在 Space 的成员列表，支持按名称搜索
@@ -593,6 +602,7 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 func (bf *BotFather) botGroupUpdate(c *wkhttp.Context) {
 	robotID := getRobotIDFromContext(c)
 	groupNo := c.Param("group_no")
+	botName := bf.resolveBotDisplayName(robotID)
 
 	// 权限检查：Bot 必须是群成员
 	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
@@ -677,7 +687,7 @@ func (bf *BotFather) botGroupUpdate(c *wkhttp.Context) {
 		bf.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
 			GroupNo:      groupNo,
 			Operator:     robotID,
-			OperatorName: robotID,
+			OperatorName: botName,
 			Attr:         common.GroupAttrKeyName,
 			Data:         map[string]string{"name": *req.Name},
 		})
@@ -686,7 +696,7 @@ func (bf *BotFather) botGroupUpdate(c *wkhttp.Context) {
 		bf.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
 			GroupNo:      groupNo,
 			Operator:     robotID,
-			OperatorName: robotID,
+			OperatorName: botName,
 			Attr:         common.GroupAttrKeyNotice,
 			Data:         map[string]string{"notice": *req.Notice},
 		})
@@ -702,6 +712,7 @@ func (bf *BotFather) botGroupUpdate(c *wkhttp.Context) {
 func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 	robotID := getRobotIDFromContext(c)
 	groupNo := c.Param("group_no")
+	botName := bf.resolveBotDisplayName(robotID)
 
 	// 权限检查：Bot 必须是群成员
 	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
@@ -834,7 +845,7 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 		// 发布成员添加事件
 		bf.ctx.SendGroupMemberAdd(&config.MsgGroupMemberAddReq{
 			Operator:     robotID,
-			OperatorName: robotID,
+			OperatorName: botName,
 			GroupNo:      groupNo,
 			Members:      addedVos,
 		})
@@ -857,6 +868,7 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 func (bf *BotFather) botGroupMemberRemove(c *wkhttp.Context) {
 	robotID := getRobotIDFromContext(c)
 	groupNo := c.Param("group_no")
+	botName := bf.resolveBotDisplayName(robotID)
 
 	// 权限检查：Bot 必须是群成员
 	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
@@ -950,7 +962,7 @@ func (bf *BotFather) botGroupMemberRemove(c *wkhttp.Context) {
 		// 发布成员移除事件
 		bf.ctx.SendGroupMemberBeRemove(&config.MsgGroupMemberRemoveReq{
 			Operator:     robotID,
-			OperatorName: robotID,
+			OperatorName: botName,
 			GroupNo:      groupNo,
 			Members:      removedVos,
 		})
