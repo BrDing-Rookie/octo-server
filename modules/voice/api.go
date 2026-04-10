@@ -9,7 +9,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
-	"github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -19,7 +18,7 @@ type Voice struct {
 	ctx     *config.Context
 	service *VoiceService
 	cfg     *VoiceConfig
-	db      *VoiceDB
+	db      VoiceStore
 	log.Log
 }
 
@@ -131,7 +130,7 @@ func (v *Voice) getContext(c *wkhttp.Context) {
 		return
 	}
 
-	isMember, err := space.CheckMembership(v.db.session, spaceID, loginUID)
+	isMember, err := v.db.CheckSpaceMembership(spaceID, loginUID)
 	if err != nil {
 		v.Error("check space membership failed", zap.Error(err), zap.String("uid", loginUID), zap.String("spaceID", spaceID))
 		c.ResponseErrorWithStatus(errors.New("check space membership failed"), http.StatusInternalServerError)

@@ -195,6 +195,15 @@ func (bf *BotFather) botTranscribe(c *wkhttp.Context) {
 		return
 	}
 
+	effectiveMode := mode
+	if effectiveMode == "" {
+		effectiveMode = bf.voiceCfg.EditMode
+	}
+	if bf.voiceCfg.Engine == "gpt" && effectiveMode == "edit" {
+		c.ResponseErrorWithStatus(voice.ErrGPTEditNotSupported, http.StatusBadRequest)
+		return
+	}
+
 	text, usedModel, err := bf.voiceSvc.TranscribeWithOptions(audioData, mimeType, contextText, chatContext, voice.TranscribeOptions{
 		Mode:  mode,
 		Model: model,

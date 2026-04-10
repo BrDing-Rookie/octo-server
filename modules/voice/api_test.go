@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
@@ -18,6 +19,22 @@ import (
 
 func init() {
 	gin.SetMode(gin.TestMode)
+}
+
+// mockVoiceStore is a mock implementation of VoiceStore for testing
+type mockVoiceStore struct {
+	contextResult    *UserVoiceContextModel
+	contextErr       error
+	membershipResult bool
+	membershipErr    error
+}
+
+func (m *mockVoiceStore) QueryVoiceContext(uid, spaceID string) (*UserVoiceContextModel, error) {
+	return m.contextResult, m.contextErr
+}
+
+func (m *mockVoiceStore) CheckSpaceMembership(spaceID, uid string) (bool, error) {
+	return m.membershipResult, m.membershipErr
 }
 
 // setupTestRouter creates a test router with voice endpoints (no auth middleware)
@@ -652,6 +669,93 @@ func TestTranscribeWithOptions_ModelOverride(t *testing.T) {
 }
 
 // --- Rune-safe context truncation in transcribe handler ---
+
+// --- GET /v1/voice/context tests (mocked DB) ---
+
+func setupContextTestRouter(store VoiceStore) *wkhttp.WKHttp {
+	r := wkhttp.New()
+	v := &Voice{
+		cfg: &VoiceConfig{},
+		db:  store,
+		Log: log.NewTLog("VoiceTest"),
+	}
+
+	// Fake auth middleware that sets uid
+	group := r.Group("/v1/voice", func(c *wkhttp.Context) {
+		c.Set("uid", "test_user")
+		c.Next()
+	})
+	group.GET("/context", v.getContext)
+	return r
+}
+
+func TestGetContextAPI_HasContext(t *testing.T) {
+	store := &mockVoiceStore{
+		membershipResult: true,
+		contextResult: &UserVoiceContextModel{
+			UID:               "test_user",
+			SpaceID:           "space1",
+			ASRCorrectContext: "my correction terms",
+			UpdatedAt:         time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	router := setupContextTestRouter(store)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/context?space_id=space1", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, true, resp["has_context"])
+	assert.Equal(t, "my correction terms", resp["context"])
+	assert.NotEmpty(t, resp["updated_at"])
+}
+
+func TestGetContextAPI_NoContext(t *testing.T) {
+	store := &mockVoiceStore{
+		membershipResult: true,
+		contextResult:    nil,
+	}
+	router := setupContextTestRouter(store)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/context?space_id=space1", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, false, resp["has_context"])
+	assert.Equal(t, "", resp["context"])
+}
+
+func TestGetContextAPI_MissingSpaceID(t *testing.T) {
+	store := &mockVoiceStore{}
+	router := setupContextTestRouter(store)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/context", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "space_id is required")
+}
+
+func TestGetContextAPI_NotMember(t *testing.T) {
+	store := &mockVoiceStore{
+		membershipResult: false,
+	}
+	router := setupContextTestRouter(store)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/context?space_id=space1", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "no permission")
+}
 
 func TestTranscribeAPI_RuneSafeChatContextTruncation(t *testing.T) {
 	var receivedPrompt string

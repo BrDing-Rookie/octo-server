@@ -4,8 +4,15 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gocraft/dbr/v2"
 )
+
+// VoiceStore abstracts database operations for the voice module.
+type VoiceStore interface {
+	QueryVoiceContext(uid, spaceID string) (*UserVoiceContextModel, error)
+	CheckSpaceMembership(spaceID, uid string) (bool, error)
+}
 
 // VoiceDB handles database operations for the voice module
 type VoiceDB struct {
@@ -30,6 +37,11 @@ type UserVoiceContextModel struct {
 	CreatedAt         time.Time `db:"created_at"`
 	UpdatedAt         time.Time `db:"updated_at"`
 	UpdatedBy         string    `db:"updated_by"`
+}
+
+// CheckSpaceMembership checks if the user is a member of the given space.
+func (d *VoiceDB) CheckSpaceMembership(spaceID, uid string) (bool, error) {
+	return space.CheckMembership(d.session, spaceID, uid)
 }
 
 // QueryVoiceContext returns the user's voice correction context for a given space.

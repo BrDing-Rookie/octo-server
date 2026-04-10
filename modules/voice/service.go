@@ -45,12 +45,19 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 	return s.TranscribeWithOptions(audioData, mimeType, contextText, chatContext, TranscribeOptions{})
 }
 
+// ErrGPTEditNotSupported is returned when edit mode is requested with GPT engine.
+var ErrGPTEditNotSupported = fmt.Errorf("edit mode is not supported with GPT engine")
+
 // TranscribeWithOptions supports per-request mode/model override.
 // Empty option fields fall back to the global configuration.
 func (s *VoiceService) TranscribeWithOptions(audioData []byte, mimeType, contextText, chatContext string, opts TranscribeOptions) (string, string, error) {
 	mode := s.config.EditMode
 	if opts.Mode != "" {
 		mode = opts.Mode
+	}
+
+	if s.config.Engine == "gpt" && mode == "edit" {
+		return "", "", ErrGPTEditNotSupported
 	}
 
 	svc := s

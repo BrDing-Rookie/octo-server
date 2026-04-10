@@ -271,6 +271,55 @@ func TestBotTranscribe_FileSizeExceeded(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "file size exceeds limit")
 }
 
+func TestBotTranscribe_GPT_EditModeRejected(t *testing.T) {
+	s, bf, botToken := setupVoiceTestEnv(t)
+	bf.voiceCfg.LiteLLMUrl = "https://unused.example.com"
+	bf.voiceCfg.LiteLLMKey = "key"
+	bf.voiceCfg.Engine = "gpt"
+	bf.voiceCfg.EditMode = "append"
+
+	// Explicit mode=edit with GPT engine should return 400
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("audio", "test.wav")
+	part.Write([]byte("fake-audio"))
+	writer.WriteField("mode", "edit")
+	writer.Close()
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/bot/voice/transcribe", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "edit mode is not supported with GPT engine")
+}
+
+func TestBotTranscribe_GPT_EditModeRejected_DefaultMode(t *testing.T) {
+	s, bf, botToken := setupVoiceTestEnv(t)
+	bf.voiceCfg.LiteLLMUrl = "https://unused.example.com"
+	bf.voiceCfg.LiteLLMKey = "key"
+	bf.voiceCfg.Engine = "gpt"
+	bf.voiceCfg.EditMode = "edit" // default mode is edit
+
+	// No explicit mode field, but default is edit → should return 400
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("audio", "test.wav")
+	part.Write([]byte("fake-audio"))
+	writer.Close()
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/bot/voice/transcribe", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "edit mode is not supported with GPT engine")
+}
+
 // --- Auth tests ---
 
 func TestBotVoiceContext_InvalidToken(t *testing.T) {
