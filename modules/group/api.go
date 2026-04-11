@@ -209,7 +209,7 @@ func (g *Group) disband(c *wkhttp.Context) {
 
 func (g *Group) membersGet(c *wkhttp.Context) {
 	keyword := c.Query("keyword")
-	groupNo := c.Param("group_no")
+	groupNo := resolveGroupNo(c.Param("group_no"))
 	limit, _ := strconv.ParseUint(c.Query("limit"), 10, 64)
 	page, _ := strconv.ParseUint(c.Query("page"), 10, 64)
 	if page <= 0 {
@@ -379,7 +379,7 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 
 // 同步群成员
 func (g *Group) syncMembers(c *wkhttp.Context) {
-	groupNo := c.Param("group_no")
+	groupNo := resolveGroupNo(c.Param("group_no"))
 
 	if g.ctx.GetConfig().IsVisitorChannel(groupNo) {
 		c.Request.URL.Path = fmt.Sprintf("/v1/hotline/visitor/channels/%s/members", groupNo)
@@ -2879,6 +2879,17 @@ func (g *Group) getGroupInfo(groupNo string) (*Model, error) {
 		return nil, errors.New("群不存在")
 	}
 	return group, nil
+}
+
+// resolveGroupNo extracts the parent group number from a thread channel ID
+// (format: "groupNo____shortId") or returns the input unchanged for regular groups.
+func resolveGroupNo(groupNo string) string {
+	// mirrors thread.ChannelIDSeparator (modules/thread/const.go)
+	const threadSeparator = "____"
+	if idx := strings.Index(groupNo, threadSeparator); idx > 0 {
+		return groupNo[:idx]
+	}
+	return groupNo
 }
 
 // getGroupMdMaxSize is a convenience alias for GetGroupMdMaxSize (service layer)
