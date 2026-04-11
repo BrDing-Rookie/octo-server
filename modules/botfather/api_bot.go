@@ -414,10 +414,6 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 		c.ResponseError(errors.New("members is required"))
 		return
 	}
-	// creator 可选，不传则默认 members[0] 为群主
-	if req.Creator == "" {
-		req.Creator = req.Members[0]
-	}
 
 	// 如果没传 space_id，自动使用 Bot 所在的第一个 Space
 	if req.SpaceID == "" {
@@ -430,10 +426,52 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 		}
 	}
 
+	// 过滤 bot 成员：Bot API 只允许拉人，不允许拉其他 bot
+	memberUsers, err := bf.userDB.QueryByUIDs(req.Members)
+	if err != nil {
+		bf.Error("query member info failed", zap.Error(err))
+		c.ResponseError(errors.New("failed to query member info"))
+		return
+	}
+	// 按原始 req.Members 顺序过滤，保留顺序
+	robotSet := make(map[string]bool)
+	for _, u := range memberUsers {
+		if u.Robot == 1 {
+			robotSet[u.UID] = true
+		}
+	}
+	var humanMembers []string
+	for _, uid := range req.Members {
+		if !robotSet[uid] {
+			humanMembers = append(humanMembers, uid)
+		}
+	}
+	if len(humanMembers) == 0 {
+		c.ResponseError(errors.New("only human members can be added through bot API"))
+		return
+	}
+
+	// creator 校验：不能是 bot，默认值在过滤后的 humanMembers 上取
+	if req.Creator == "" {
+		req.Creator = humanMembers[0]
+	} else {
+		// 显式传了 creator，校验不能是 bot
+		creatorUser, err := bf.userDB.QueryByUID(req.Creator)
+		if err != nil {
+			bf.Error("query creator info failed", zap.Error(err))
+			c.ResponseError(errors.New("failed to query creator info"))
+			return
+		}
+		if creatorUser != nil && creatorUser.Robot == 1 {
+			c.ResponseError(errors.New("creator cannot be a bot"))
+			return
+		}
+	}
+
 	// 调用 Service 创建群
 	createResp, err := bf.groupService.CreateGroup(&group.CreateGroupServiceReq{
 		Creator: req.Creator,
-		Members: req.Members,
+		Members: humanMembers,
 		Name:    req.Name,
 		SpaceID: req.SpaceID,
 		BotUID:  robotID,

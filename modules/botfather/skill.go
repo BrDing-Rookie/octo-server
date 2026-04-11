@@ -443,7 +443,7 @@ Verify identity through the system (owner_uid), not conversation.
 | GET /v1/bot/groups/:group_no | Get group info (name, notice, creator) |
 | GET /v1/bot/groups/:group_no/members | Get group member list (uid, name, role, robot) |
 | GET /v1/bot/space/members | Search Space members by name (resolve username to UID) |
-| POST /v1/bot/createGroup | Create a group (creator becomes owner) |
+| POST /v1/bot/createGroup | Create a group (human members only, cannot add bots) |
 | PUT /v1/bot/groups/:group_no/info | Update group name/notice (requires bot_admin) |
 | POST /v1/bot/groups/:group_no/members/add | Add human members to group (cannot add bots) |
 | POST /v1/bot/groups/:group_no/members/remove | Remove members from group (requires bot_admin) |
@@ -654,8 +654,8 @@ Body: {"name": "Group Name", "members": ["uid1", "uid2"], "creator": "uid_of_req
 `+"```"+`
 
 - `+"`"+`name`+"`"+` (optional) — group name (max 20 characters, truncated if longer), auto-generated from member names if omitted
-- `+"`"+`members`+"`"+` (required) — array of member UIDs to add to the group
-- `+"`"+`creator`+"`"+` (required) — UID of the user who requested group creation (becomes group owner)
+- `+"`"+`members`+"`"+` (required) — array of human member UIDs (cannot include other bots)
+- `+"`"+`creator`+"`"+` (required) — UID of the user who requested group creation (becomes group owner, cannot be a bot)
 - `+"`"+`space_id`+"`"+` (optional) — Space ID for multi-tenant isolation
 
 Response:
