@@ -2377,6 +2377,29 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 			return
 		}
 	}
+	// 生成群头像更新事件
+	var groupAvatarEventID int64
+	groupIsUploadAvatar, _ := g.db.queryGroupAvatarIsUpload(groupNo)
+	if groupIsUploadAvatar != 1 {
+		remainingMembers, _ := g.db.QueryMembersFirstNine(groupNo)
+		if len(remainingMembers) < 9 {
+			avatarUIDs := make([]string, 0, len(remainingMembers))
+			for _, m := range remainingMembers {
+				avatarUIDs = append(avatarUIDs, m.UID)
+			}
+			groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
+				Event: event.GroupAvatarUpdate,
+				Type:  wkevent.CMD,
+				Data: &config.CMDGroupAvatarUpdateReq{
+					GroupNo: groupNo,
+					Members: avatarUIDs,
+				},
+			}, tx)
+			if err != nil {
+				g.Error("开启群头像更新事件失败！", zap.Error(err))
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		tx.RollbackUnlessCommitted()
 		g.Error("提交事务失败！", zap.Error(err))
@@ -2384,6 +2407,9 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		return
 	}
 	g.ctx.EventCommit(eventID)
+	if groupAvatarEventID != 0 {
+		g.ctx.EventCommit(groupAvatarEventID)
+	}
 	// 移除用户在该群所有子区的成员身份
 	g.removeUserFromGroupThreads(groupNo, loginUID)
 	// 发送群成员更新命令

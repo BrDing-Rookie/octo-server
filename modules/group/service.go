@@ -1242,10 +1242,41 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
 	}
 
+	// 生成群头像更新事件（事务内）
+	var groupAvatarEventID int64
+	if s.ctx.Event != nil && len(removedUIDs) > 0 {
+		groupIsUploadAvatar, _ := s.db.queryGroupAvatarIsUpload(req.GroupNo)
+		if groupIsUploadAvatar != 1 {
+			remainingMembers, _ := s.db.QueryMembersFirstNine(req.GroupNo)
+			if len(remainingMembers) < 9 {
+				avatarUIDs := make([]string, 0, len(remainingMembers))
+				for _, m := range remainingMembers {
+					avatarUIDs = append(avatarUIDs, m.UID)
+				}
+				groupAvatarEventID, err = s.ctx.EventBegin(&wkevent.Data{
+					Event: event.GroupAvatarUpdate,
+					Type:  wkevent.CMD,
+					Data: &config.CMDGroupAvatarUpdateReq{
+						GroupNo: req.GroupNo,
+						Members: avatarUIDs,
+					},
+				}, tx)
+				if err != nil {
+					s.Error("begin group avatar update event failed", zap.Error(err))
+				}
+			}
+		}
+	}
+
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
+	}
+
+	// 提交头像生成事件
+	if groupAvatarEventID != 0 {
+		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// IM 操作（事务提交之后）
