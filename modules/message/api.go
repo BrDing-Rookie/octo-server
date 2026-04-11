@@ -2445,16 +2445,26 @@ type ProhibitWordResp struct {
 	CreatedAt string `json:"created_at"` // 时间
 }
 
-// enrichThreadCreatedMessages 遍历群消息，对 ThreadCreated 类型的消息 payload 注入实时 thread 元数据
-func (m *Message) enrichThreadCreatedMessages(messages []*MsgSyncResp) {
-	// 收集所有 ThreadCreated 消息的 shortID
+// payloadMsgType 从 payload 中提取消息类型，兼容 float64 和 json.Number
+func payloadMsgType(payload map[string]interface{}) int {
+	switch v := payload["type"].(type) {
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	}
+	return 0
+}
+
+// extractThreadShortIDs 从消息列表中提取 ThreadCreated 消息的 shortID
+func extractThreadShortIDs(messages []*MsgSyncResp) []string {
 	shortIDs := make([]string, 0)
 	for _, msg := range messages {
 		if msg.Payload == nil {
 			continue
 		}
-		msgType, _ := msg.Payload["type"].(float64)
-		if int(msgType) != thread.ContentTypeThreadCreated {
+		if payloadMsgType(msg.Payload) != thread.ContentTypeThreadCreated {
 			continue
 		}
 		shortID, _ := msg.Payload["short_id"].(string)
@@ -2463,6 +2473,12 @@ func (m *Message) enrichThreadCreatedMessages(messages []*MsgSyncResp) {
 		}
 		shortIDs = append(shortIDs, shortID)
 	}
+	return shortIDs
+}
+
+// enrichThreadCreatedMessages 遍历群消息，对 ThreadCreated 类型的消息 payload 注入实时 thread 元数据
+func (m *Message) enrichThreadCreatedMessages(messages []*MsgSyncResp) {
+	shortIDs := extractThreadShortIDs(messages)
 	if len(shortIDs) == 0 {
 		return
 	}
@@ -2479,8 +2495,7 @@ func (m *Message) enrichThreadCreatedMessages(messages []*MsgSyncResp) {
 		if msg.Payload == nil {
 			continue
 		}
-		msgType, _ := msg.Payload["type"].(float64)
-		if int(msgType) != thread.ContentTypeThreadCreated {
+		if payloadMsgType(msg.Payload) != thread.ContentTypeThreadCreated {
 			continue
 		}
 		shortID, _ := msg.Payload["short_id"].(string)
