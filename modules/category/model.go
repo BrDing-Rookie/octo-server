@@ -10,6 +10,7 @@ type CategoryModel struct {
 	Name       string
 	Sort       int
 	Status     int
+	IsDefault  int
 	db.BaseModel
 }
 

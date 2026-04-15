@@ -162,31 +162,70 @@ func (c *Category) list(ctx *wkhttp.Context) {
 		}
 	}
 
-	result := make([]categoryResp, 0, len(categories)+1)
-	for _, cat := range categories {
-		catGroups := categoryGroupMap[cat.CategoryID]
-		if catGroups == nil {
-			catGroups = make([]groupInCategoryResp, 0)
+	// 如果有未分类群组，确保默认分类存在
+	if len(uncategorized) > 0 {
+		defaultCat, err := c.db.queryDefaultCategory(loginUID, spaceID)
+		if err != nil {
+			c.Error("查询默认类别失败", zap.Error(err))
+			ctx.ResponseError(errors.New("查询类别失败"))
+			return
 		}
-		catID := cat.CategoryID
-		result = append(result, categoryResp{
-			CategoryID: &catID,
-			Name:       cat.Name,
-			Sort:       cat.Sort,
-			Groups:     catGroups,
-		})
+		if defaultCat == nil {
+			maxSort, err := c.db.maxSortByUIDAndSpaceID(loginUID, spaceID)
+			if err != nil {
+				c.Error("查询排序值失败", zap.Error(err))
+				ctx.ResponseError(errors.New("查询类别失败"))
+				return
+			}
+			newDefault := &CategoryModel{
+				CategoryID: util.GenerUUID(),
+				SpaceID:    spaceID,
+				UID:        loginUID,
+				Name:       "未分类",
+				Sort:       maxSort + 1,
+				IsDefault:  1,
+			}
+			if err = c.db.insertDefaultCategory(newDefault); err != nil {
+				c.Error("创建默认类别失败", zap.Error(err))
+				ctx.ResponseError(errors.New("创建默认类别失败"))
+				return
+			}
+			// INSERT IGNORE 后重查，确保拿到实际行（防并发竞态）
+			categories, err = c.db.queryCategoriesByUIDAndSpaceID(loginUID, spaceID)
+			if err != nil {
+				c.Error("查询类别失败", zap.Error(err))
+				ctx.ResponseError(errors.New("查询类别失败"))
+				return
+			}
+		}
 	}
 
-	// 追加未分类
-	if uncategorized == nil {
-		uncategorized = make([]groupInCategoryResp, 0)
+	result := make([]categoryResp, 0, len(categories))
+	for _, cat := range categories {
+		catID := cat.CategoryID
+		if cat.IsDefault == 1 {
+			if uncategorized == nil {
+				uncategorized = make([]groupInCategoryResp, 0)
+			}
+			result = append(result, categoryResp{
+				CategoryID: &catID,
+				Name:       cat.Name,
+				Sort:       cat.Sort,
+				Groups:     uncategorized,
+			})
+		} else {
+			catGroups := categoryGroupMap[cat.CategoryID]
+			if catGroups == nil {
+				catGroups = make([]groupInCategoryResp, 0)
+			}
+			result = append(result, categoryResp{
+				CategoryID: &catID,
+				Name:       cat.Name,
+				Sort:       cat.Sort,
+				Groups:     catGroups,
+			})
+		}
 	}
-	result = append(result, categoryResp{
-		CategoryID: nil,
-		Name:       "未分类",
-		Sort:       len(categories),
-		Groups:     uncategorized,
-	})
 
 	ctx.Response(result)
 }
@@ -208,6 +247,10 @@ func (c *Category) update(ctx *wkhttp.Context) {
 	}
 	if cat.UID != loginUID {
 		ctx.ResponseError(errors.New("无权限修改此分类"))
+		return
+	}
+	if cat.IsDefault == 1 {
+		ctx.ResponseError(errors.New("默认分类不可修改"))
 		return
 	}
 
@@ -252,6 +295,10 @@ func (c *Category) delete(ctx *wkhttp.Context) {
 	}
 	if cat.UID != loginUID {
 		ctx.ResponseError(errors.New("无权限删除此分类"))
+		return
+	}
+	if cat.IsDefault == 1 {
+		ctx.ResponseError(errors.New("默认分类不可删除"))
 		return
 	}
 
