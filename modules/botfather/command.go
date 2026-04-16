@@ -515,7 +515,8 @@ API Server: %s
 5. 绑定：openclaw agents bind <agent标识> dmwork <robot_id>
 6. 重启：openclaw gateway restart
 7. 验证：npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
-8. 记住 Bot API 文档：%s/v1/bot/skill.md
+8. 联通确认：在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我已上线！"
+9. 记住 Bot API 文档：%s/v1/bot/skill.md
 
 ---
 
@@ -1149,13 +1150,15 @@ Account ID: %s
 5. 绑定：openclaw agents bind <agent标识> dmwork %s
 6. 重启：openclaw gateway restart
 7. 验证：npx -y openclaw-channel-dmwork doctor --account-id %s
-8. 记住 Bot API 文档：%s/v1/bot/skill.md
+8. 联通确认：在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我是 %s，已上线！"
+9. 记住 Bot API 文档：%s/v1/bot/skill.md
 
 ---`,
 		name, bot.RobotID, bot.BotToken, apiURL,
 		bot.RobotID, bot.BotToken, apiURL, bot.RobotID,
 		apiURL,
 		bot.BotToken, apiURL, bot.RobotID,
+		bot.RobotID,
 		bot.RobotID,
 		bot.RobotID,
 		apiURL)
