@@ -5,10 +5,10 @@ import (
 	"runtime/debug"
 	"strings"
 
-	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -210,6 +210,14 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("验证码或密码不能为空"))
 		return
 	}
+	// 仅密码登录走 guard；验证码登录有独立的发送频控 + 验证次数限制，不纳入 guard 计数。
+	if req.Password != "" {
+		if err := u.loginGuard.Check(req.Email); err != nil {
+			u.Warn("邮箱登录被临时锁定", zap.String("email", req.Email), zap.Error(err))
+			c.ResponseError(err)
+			return
+		}
+	}
 
 	loginSpan := u.ctx.Tracer().StartSpan(
 		"user.emailLogin",
@@ -225,6 +233,9 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil {
+		if req.Password != "" {
+			u.loginGuard.RecordFailureLogged(req.Email)
+		}
 		c.ResponseError(errors.New("该邮箱未注册"))
 		return
 	}
@@ -243,9 +254,11 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 	} else {
 		matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 		if !matched {
+			u.loginGuard.RecordFailureLogged(req.Email)
 			c.ResponseError(errors.New("密码不正确！"))
 			return
 		}
+		u.loginGuard.ResetLogged(req.Email)
 		if needsMigration {
 			if newHash, hashErr := HashPassword(req.Password); hashErr == nil {
 				_ = u.db.updatePassword(newHash, userInfo.UID)
