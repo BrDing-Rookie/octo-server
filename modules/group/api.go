@@ -1,6 +1,7 @@
 package group
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -23,11 +24,13 @@ import (
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
-	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
@@ -102,8 +105,8 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		groups.GET("/:group_no/md", g.groupMdGet)                                          // 获取GROUP.md
 		groups.PUT("/:group_no/md", g.groupMdUpdate)                                       // 更新GROUP.md
 		groups.DELETE("/:group_no/md", g.groupMdDelete)                                    // 删除GROUP.md
-		groups.PUT("/:group_no/bot_admin/:uid", g.botAdminSet)                              // 设置Bot管理员
-		groups.DELETE("/:group_no/bot_admin/:uid", g.botAdminRemove)                        // 移除Bot管理员
+		groups.PUT("/:group_no/bot_admin/:uid", g.botAdminSet)                             // 设置Bot管理员
+		groups.DELETE("/:group_no/bot_admin/:uid", g.botAdminRemove)                       // 移除Bot管理员
 	}
 	openGroups := r.Group("/v1/groups")
 	{ // 获取群头像
@@ -113,10 +116,22 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 	{
 		authGroups.GET("/:group_no/scanjoin", g.groupScanJoin) // 扫码加入群（需要认证）
 	}
+	// 公开邀请落地页（无需认证）严格 per-IP 限流：防枚举 + 暴破。
+	// 与 space 模块一致：10 req/min, burst 5；preview/detail 共享同一 limiter。
+	rlRedis := redis.NewClient(&redis.Options{
+		Addr:       g.ctx.GetConfig().DB.RedisAddr,
+		Password:   g.ctx.GetConfig().DB.RedisPass,
+		MaxRetries: 1,
+		PoolSize:   10,
+	})
+	groupInviteLimit := appwkhttp.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "group_invite", 10.0/60, 5)
+
 	openGroup := r.Group("/v1/group")
 	{
 
-		openGroup.POST("invite/sure", g.groupMemberInviteSure) // 确认邀请
+		openGroup.POST("invite/sure", g.groupMemberInviteSure)                 // 确认邀请
+		openGroup.GET("/invite", groupInviteLimit, g.groupInvitePage)          // H5 邀请落地页（公开）
+		openGroup.GET("/invite/detail", groupInviteLimit, g.groupInviteDetail) // 群邀请预览信息（公开）
 	}
 	// 邀请详情需要认证
 	group.GET("/invites/:invite_no", g.groupMemberInviteDetail) // 获取邀请详情
@@ -1627,10 +1642,14 @@ func (g *Group) groupQRCode(c *wkhttp.Context) {
 		c.ResponseError(errors.New("设置缓存失败！"))
 		return
 	}
+	baseURL := g.ctx.GetConfig().External.BaseURL
 	c.Response(gin.H{
 		"day":    7,
-		"qrcode": fmt.Sprintf("%s/%s", g.ctx.GetConfig().External.BaseURL, strings.ReplaceAll(g.ctx.GetConfig().QRCodeInfoURL, ":code", uuid)),
-		"expire": time.Now().Add(time.Hour * 24 * 7).Format("01月02日"),
+		"qrcode": fmt.Sprintf("%s/%s", baseURL, strings.ReplaceAll(g.ctx.GetConfig().QRCodeInfoURL, ":code", uuid)),
+		// invite_url 是浏览器友好的公开落地页（YUJ-31），App 仍走 qrcode 字段。
+		// Web "复制邀请链接" 按钮（YUJ-30）应当使用此字段。
+		"invite_url": fmt.Sprintf("%s/v1/group/invite?code=%s", baseURL, uuid),
+		"expire":     time.Now().Add(time.Hour * 24 * 7).Format("01月02日"),
 	})
 
 }
@@ -3324,7 +3343,6 @@ type groupMdResp struct {
 	UpdatedBy string     `json:"updated_by"`
 }
 
-
 type groupDetailResp struct {
 	GroupNo     string `json:"group_no"`  // 群编号
 	Name        string `json:"name"`      // 群名称
@@ -3472,4 +3490,105 @@ func (m memberRemoveReq) Check() error {
 		return errors.New("群成员不能为空！")
 	}
 	return nil
+}
+
+// 公开邀请落地页 status 枚举（H5 与 App 共用语义）：
+//   - joinable        群存在且可直接入群
+//   - invite_required 群开启邀请确认（invite=1），需在 App 内由管理员审批
+//   - expired         邀请码不存在或已过期
+//   - not_found       群不存在或已解散
+const (
+	groupInviteStatusJoinable       = "joinable"
+	groupInviteStatusInviteRequired = "invite_required"
+	groupInviteStatusExpired        = "expired"
+	groupInviteStatusNotFound       = "not_found"
+)
+
+// groupInvitePage 返回邀请落地页 H5（无需认证，注入 API_BASE_URL）。
+// 进群操作仍走 App 内 groupScanJoin，公开页面只展示脱敏预览。
+func (g *Group) groupInvitePage(c *wkhttp.Context) {
+	htmlBytes, err := os.ReadFile("./assets/web/group_invite.html")
+	if err != nil {
+		g.Error("加载群邀请落地页失败", zap.Error(err))
+		c.ResponseError(errors.New("页面加载失败"))
+		return
+	}
+	safeBaseURL := strconv.Quote(g.ctx.GetConfig().External.BaseURL)
+	html := strings.Replace(string(htmlBytes), `"{{API_BASE_URL}}"`, safeBaseURL, 1)
+	// 注入的 BaseURL 与部署强相关；邀请链接本身也不应被搜索引擎索引或 CDN 缓存。
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Robots-Tag", "noindex, nofollow")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+}
+
+// groupInviteDetail 返回邀请码对应的群预览信息（公开接口，per-IP 限流）。
+// 仅返回脱敏字段（群名 / 头像路径 / 成员数 / status）；Space 与 allow_external
+// 等鉴权延后到 App 内 groupScanJoin 执行。
+func (g *Group) groupInviteDetail(c *wkhttp.Context) {
+	code := strings.TrimSpace(c.Query("code"))
+	if code == "" {
+		c.ResponseError(errors.New("邀请码不能为空"))
+		return
+	}
+
+	// 1. code 不在 Redis -> expired
+	qrcodeContent, err := g.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code))
+	if err != nil {
+		g.Error("获取邀请码缓存失败", zap.Error(err), zap.String("code", code))
+		c.ResponseError(errors.New("获取邀请码信息失败"))
+		return
+	}
+	if qrcodeContent == "" {
+		c.Response(gin.H{"status": groupInviteStatusExpired})
+		return
+	}
+
+	var qrCodeModel common.QRCodeModel
+	if err := util.ReadJsonByByte([]byte(qrcodeContent), &qrCodeModel); err != nil {
+		g.Error("解析邀请码缓存失败", zap.Error(err), zap.String("code", code))
+		c.Response(gin.H{"status": groupInviteStatusExpired})
+		return
+	}
+	if qrCodeModel.Type != common.QRCodeTypeGroup {
+		c.Response(gin.H{"status": groupInviteStatusExpired})
+		return
+	}
+	groupNo, _ := qrCodeModel.Data["group_no"].(string)
+	if groupNo == "" {
+		c.Response(gin.H{"status": groupInviteStatusExpired})
+		return
+	}
+
+	// 2. 群不存在或已解散 -> not_found
+	groupModel, err := g.db.QueryWithGroupNo(groupNo)
+	if err != nil {
+		g.Error("查询群资料失败", zap.Error(err), zap.String("group_no", groupNo))
+		c.ResponseError(errors.New("查询群资料失败"))
+		return
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		c.Response(gin.H{"status": groupInviteStatusNotFound})
+		return
+	}
+
+	memberCount, err := g.db.QueryMemberCount(groupNo)
+	if err != nil {
+		g.Error("查询群成员数失败", zap.Error(err), zap.String("group_no", groupNo))
+		c.ResponseError(errors.New("查询群成员数失败"))
+		return
+	}
+
+	// 3/4. invite=1 -> invite_required；否则 joinable
+	status := groupInviteStatusJoinable
+	if groupModel.Invite == 1 {
+		status = groupInviteStatusInviteRequired
+	}
+
+	c.Response(gin.H{
+		"status":       status,
+		"group_no":     groupNo,
+		"group_name":   groupModel.Name,
+		"avatar":       fmt.Sprintf("groups/%s/avatar", groupNo),
+		"member_count": memberCount,
+	})
 }
