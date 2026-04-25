@@ -24,8 +24,8 @@ import (
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
-	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
@@ -105,8 +105,8 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		groups.GET("/:group_no/md", g.groupMdGet)                                          // 获取GROUP.md
 		groups.PUT("/:group_no/md", g.groupMdUpdate)                                       // 更新GROUP.md
 		groups.DELETE("/:group_no/md", g.groupMdDelete)                                    // 删除GROUP.md
-		groups.PUT("/:group_no/bot_admin/:uid", g.botAdminSet)                              // 设置Bot管理员
-		groups.DELETE("/:group_no/bot_admin/:uid", g.botAdminRemove)                        // 移除Bot管理员
+		groups.PUT("/:group_no/bot_admin/:uid", g.botAdminSet)                             // 设置Bot管理员
+		groups.DELETE("/:group_no/bot_admin/:uid", g.botAdminRemove)                       // 移除Bot管理员
 	}
 	openGroups := r.Group("/v1/groups")
 	{ // 获取群头像
@@ -129,8 +129,8 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 	openGroup := r.Group("/v1/group")
 	{
 
-		openGroup.POST("invite/sure", g.groupMemberInviteSure)              // 确认邀请
-		openGroup.GET("/invite", groupInviteLimit, g.groupInvitePage)       // H5 邀请落地页（公开）
+		openGroup.POST("invite/sure", g.groupMemberInviteSure)                 // 确认邀请
+		openGroup.GET("/invite", groupInviteLimit, g.groupInvitePage)          // H5 邀请落地页（公开）
 		openGroup.GET("/invite/detail", groupInviteLimit, g.groupInviteDetail) // 群邀请预览信息（公开）
 	}
 	// 邀请详情需要认证
@@ -3339,7 +3339,6 @@ type groupMdResp struct {
 	UpdatedBy string     `json:"updated_by"`
 }
 
-
 type groupDetailResp struct {
 	GroupNo     string `json:"group_no"`  // 群编号
 	Name        string `json:"name"`      // 群名称
@@ -3495,10 +3494,10 @@ func (m memberRemoveReq) Check() error {
 //   - expired         邀请码不存在或已过期
 //   - not_found       群不存在或已解散
 const (
-	groupInviteStatusJoinable        = "joinable"
-	groupInviteStatusInviteRequired  = "invite_required"
-	groupInviteStatusExpired         = "expired"
-	groupInviteStatusNotFound        = "not_found"
+	groupInviteStatusJoinable       = "joinable"
+	groupInviteStatusInviteRequired = "invite_required"
+	groupInviteStatusExpired        = "expired"
+	groupInviteStatusNotFound       = "not_found"
 )
 
 // groupInvitePage 返回邀请落地页 H5（无需认证，注入 API_BASE_URL）。
@@ -3512,6 +3511,9 @@ func (g *Group) groupInvitePage(c *wkhttp.Context) {
 	}
 	safeBaseURL := strconv.Quote(g.ctx.GetConfig().External.BaseURL)
 	html := strings.Replace(string(htmlBytes), `"{{API_BASE_URL}}"`, safeBaseURL, 1)
+	// 注入的 BaseURL 与部署强相关；邀请链接本身也不应被搜索引擎索引或 CDN 缓存。
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Robots-Tag", "noindex, nofollow")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 
