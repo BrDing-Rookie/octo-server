@@ -77,13 +77,18 @@ func (s *Space) previewEmailInvite(c *wkhttp.Context) {
 		resp.PlannedJoinMode = inv.PlannedJoinMode
 	case EmailInviteTypeMember:
 		space, sErr := s.db.querySpaceByID(inv.SpaceId)
-		if sErr == nil && space != nil {
+		if sErr != nil {
+			s.Warn("预览时查询空间失败", zap.Error(sErr), zap.String("spaceId", inv.SpaceId))
+		}
+		if space != nil {
 			resp.SpaceId = space.SpaceId
 			resp.SpaceName = space.Name
 			resp.SpaceLogo = space.Logo
 			resp.JoinMode = space.JoinMode
 			if cnt, cErr := s.db.queryActiveMemberCount(inv.SpaceId); cErr == nil {
 				resp.MemberCount = cnt
+			} else {
+				s.Warn("预览时查询成员数失败", zap.Error(cErr), zap.String("spaceId", inv.SpaceId))
 			}
 		}
 	}
@@ -122,13 +127,19 @@ func (s *Space) acceptEmailInvite(c *wkhttp.Context) {
 		return
 	}
 
+	if inv.Email == "" {
+		// 历史脏数据兜底：邀请记录无邮箱时直接拒绝，避免空字符串自匹配。
+		c.ResponseError(errors.New("邀请缺少邮箱信息，无法接受"))
+		return
+	}
 	loginEmail, err := s.db.queryUserEmail(loginUID)
 	if err != nil {
 		s.Error("查询登录用户邮箱失败", zap.Error(err), zap.String("loginUID", loginUID))
 		c.ResponseError(errors.New("校验邮箱失败"))
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(loginEmail), inv.Email) {
+	loginEmail = strings.TrimSpace(loginEmail)
+	if loginEmail == "" || !strings.EqualFold(loginEmail, inv.Email) {
 		c.ResponseError(errors.New("当前登录账号邮箱与邀请目标不一致"))
 		return
 	}
@@ -197,7 +208,9 @@ func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel
 		c.ResponseError(errors.New("查询空间失败"))
 		return
 	}
-	if space == nil {
+	if space == nil || space.Status != SpaceStatusNormal {
+		// 显式 defense-in-depth：即使 querySpaceByID 已过滤 status=1，未来若放宽条件也不会
+		// 让 token 在已解散/封禁空间上被消耗。
 		c.ResponseError(errors.New("空间不存在或已解散"))
 		return
 	}
@@ -210,15 +223,15 @@ func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel
 		c.ResponseError(errors.New("接受邀请失败"))
 		return
 	}
+	defer tx.RollbackUnlessCommitted()
+
 	affected, err := s.db.consumeEmailInviteTx(tx, inv.Id, loginUID)
 	if err != nil {
-		_ = tx.Rollback()
 		s.Error("消费 token 失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
 		c.ResponseError(errors.New("接受邀请失败"))
 		return
 	}
 	if affected == 0 {
-		_ = tx.Rollback()
 		c.ResponseError(errors.New("邀请已被处理或已过期"))
 		return
 	}
@@ -229,15 +242,16 @@ func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel
 	}
 
 	if err := s.executeJoinSpace(loginUID, inv.SpaceId, space); err != nil {
+		// 幂等：已是成员视为成功，保留 consumed 状态。其它错误才回滚 token 到 pending，
+		// 让用户/客户端可以重试或换链接（避免 token 因瞬态错误永久作废）。
+		if errors.Is(err, ErrAlreadyMember) {
+			s.Info("接受邀请时用户已是成员，保留 consumed 状态", zap.Int64("inviteID", inv.Id))
+			c.Response(map[string]interface{}{"space_id": inv.SpaceId})
+			return
+		}
 		s.rollbackConsumedInvite(inv.Id, loginUID)
 		if errors.Is(err, ErrSpaceFull) {
 			c.ResponseError(errors.New("空间已满，无法加入"))
-			return
-		}
-		if errors.Is(err, ErrAlreadyMember) {
-			// 幂等：已是成员视为成功，但保留消费状态（成员关系已存在）
-			s.markAcceptedAlreadyMember(inv.Id)
-			c.Response(map[string]interface{}{"space_id": inv.SpaceId})
 			return
 		}
 		s.Error("加入空间失败", zap.Error(err), zap.String("spaceId", inv.SpaceId))
@@ -265,11 +279,6 @@ func (s *Space) rollbackConsumedInvite(id int64, consumedBy string) {
 	).Exec(); err != nil {
 		s.Error("回滚邮件邀请状态失败", zap.Error(err), zap.Int64("id", id))
 	}
-}
-
-// markAcceptedAlreadyMember 仅做日志记录占位，已 consumed 的邀请保持 consumed 状态即可。
-func (s *Space) markAcceptedAlreadyMember(id int64) {
-	s.Info("接受邀请时用户已是成员", zap.Int64("inviteID", id))
 }
 
 // liveStatus 用过期时间动态推导邀请的展示状态：pending 且已过期则展示 expired。

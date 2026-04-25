@@ -355,6 +355,53 @@ func TestAcceptEmailInvite_DisbandedSpaceForMember(t *testing.T) {
 	assert.Equal(t, EmailInviteStatusPending, got.Status, "空间已解散应保留邀请为 pending")
 }
 
+func TestAcceptEmailInvite_AlreadyMember_KeepsConsumed(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	spaceId := "sp-already-mem"
+	// testutil.UID 已是空间成员（owner）
+	seedSpaceWithMemberRole(t, spaceId, testutil.UID, 2)
+	seedUserWithEmail(t, testutil.UID, "dup@x.com", "")
+
+	raw, id := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType: EmailInviteTypeMember,
+		Email:      "dup@x.com",
+		SpaceId:    spaceId,
+		Role:       EmailInviteRoleMember,
+		Status:     EmailInviteStatusPending,
+		CreatedBy:  testutil.UID,
+	})
+
+	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	got, _ := testSpaceDB.queryEmailInviteByID(id)
+	assert.Equal(t, EmailInviteStatusConsumed, got.Status,
+		"已是成员场景应保留 consumed，避免 token 被回退到 pending 后重复使用")
+	assert.Equal(t, testutil.UID, got.ConsumedBy)
+}
+
+func TestAcceptEmailInvite_EmptyInviteEmail_Rejected(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	seedUserWithEmail(t, testutil.UID, "x@x.com", "")
+
+	raw, id := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType:  EmailInviteTypeOwner,
+		Email:       "", // 历史脏数据兜底
+		PlannedName: "y",
+		Status:      EmailInviteStatusPending,
+		CreatedBy:   "admin-1",
+	})
+
+	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	assert.NotEqual(t, http.StatusOK, w.Code)
+	got, _ := testSpaceDB.queryEmailInviteByID(id)
+	assert.Equal(t, EmailInviteStatusPending, got.Status)
+}
+
 func TestAcceptEmailInvite_RequiresAuth(t *testing.T) {
 	srv, _, err := setup(t)
 	resetSpaceInviteRateLimit(t)
