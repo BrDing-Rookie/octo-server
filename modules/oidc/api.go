@@ -205,15 +205,28 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, errMsg("state required"))
 		return
 	}
+	statePreview := state
+	if len(state) > 8 {
+		statePreview = state[:8] + "..."
+	}
+	o.Debug("OIDC callback 开始", zap.String("state", statePreview))
+
 	sd, err := o.stateStore.Consume(c.Request.Context(), state)
 	if err != nil {
+		o.Debug("OIDC callback state 无效", zap.Error(err))
 		o.Warn("OIDC state 校验失败", zap.Error(err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, errMsg("state invalid"))
 		return
 	}
+	authcodePreview := sd.ClientAuthcode
+	if len(authcodePreview) > 8 {
+		authcodePreview = authcodePreview[:8] + "..."
+	}
+	o.Debug("OIDC callback state 消费成功", zap.String("authcode", authcodePreview))
 
 	// IdP 自身报错(用户拒绝授权 / 配置错误)
 	if oerr := c.Query("error"); oerr != "" {
+		o.Debug("OIDC callback IdP 报错", zap.String("error", oerr))
 		o.failWithAuthcode(c.Request.Context(), sd, nil, fmt.Errorf("idp error: %s", oerr))
 		o.redirectAfterCallback(c, sd, true)
 		return
@@ -221,34 +234,53 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 
 	code := c.Query("code")
 	if code == "" {
+		o.Debug("OIDC callback 缺 code")
 		o.failWithAuthcode(c.Request.Context(), sd, nil, errors.New("missing code"))
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
+	o.Debug("OIDC callback 开始 Exchange")
 
 	tok, err := o.client.Exchange(c.Request.Context(), code, sd.CodeVerifier)
 	if err != nil {
+		o.Debug("OIDC callback Exchange 失败", zap.Error(err))
 		o.failWithAuthcode(c.Request.Context(), sd, nil, err)
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
+	o.Debug("OIDC callback Exchange 成功")
+
 	rawID, _ := tok.Extra("id_token").(string)
 	if rawID == "" {
+		o.Debug("OIDC callback id_token 缺失")
 		o.failWithAuthcode(c.Request.Context(), sd, nil, errors.New("id_token missing from token response"))
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
+	o.Debug("OIDC callback 开始 VerifyIDToken")
+
 	claims, err := o.client.VerifyIDToken(c.Request.Context(), rawID)
 	if err != nil {
+		o.Debug("OIDC callback VerifyIDToken 失败", zap.Error(err))
 		o.failWithAuthcode(c.Request.Context(), sd, nil, err)
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
+	// TODO(an9xyz): remove after OIDC callback issue is resolved
+	o.Debug("OIDC callback VerifyIDToken 成功",
+		zap.String("sub", claims.Subject),
+		zap.String("email", maskEmail(claims.Email)),
+		zap.Bool("email_verified", claims.EmailVerified))
+
 	if claims.Nonce != sd.Nonce {
+		o.Debug("OIDC callback nonce 不匹配",
+			zap.String("claims_nonce", claims.Nonce),
+			zap.String("state_nonce", sd.Nonce))
 		o.failWithAuthcode(c.Request.Context(), sd, claims, errors.New("nonce mismatch"))
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
+	o.Debug("OIDC callback nonce 匹配,开始 ResolveOrLink")
 
 	res, err := o.service.ResolveOrLink(c.Request.Context(), claims)
 	if err != nil {
@@ -529,4 +561,12 @@ func (r redisAuthcode) SetAuthcode(ctx context.Context, authcode, payload string
 	case <-timer.C:
 		return fmt.Errorf("oidc: SetAuthcode timeout after %s", timeout)
 	}
+}
+
+func maskEmail(email string) string {
+	at := strings.Index(email, "@")
+	if at <= 1 {
+		return email
+	}
+	return email[:1] + "***" + email[at:]
 }
