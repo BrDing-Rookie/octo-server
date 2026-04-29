@@ -154,6 +154,7 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
 	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开
 	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)      // 10 req/min, burst 5
+	verifyLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "verify", 1000.0/60, 100) // 1000 req/min, burst 100 (Gateway traffic)
 	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "register", 5.0/60, 3) // 5 req/min, burst 3
 	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "sms", 5.0/60, 3)           // 5 req/min, burst 3
 	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "search", 30.0/60, 15)   // 30 req/min, burst 15
@@ -246,6 +247,13 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/login_authcode/:auth_code", loginLimit, u.loginWithAuthCode) // 通过认证码登录
 		v.POST("/user/sms/login_check_phone", smsLimit, u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
 		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone) //登录验证设备手机号
+
+		// #################### Token / Bot 认证验证（供 Gateway 调用） ####################
+		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)    // 验证用户 token
+		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot)  // 验证 Bot API Key
+		// ↑ Verify endpoints are rate-limited (1000 req/min/IP). For production,
+		// restrict access at network level (nginx allow internal IPs only) or
+		// add X-Internal-Key header validation.
 
 		// #################### 第三方授权 ####################
 		v.GET("/user/thirdlogin/authcode", u.thirdAuthcode)     // 第三方授权码获取
@@ -3269,4 +3277,148 @@ func ValidateName(name string) error {
 		return errors.New("名字不能包含@字符！")
 	}
 	return nil
+}
+
+
+// ==================== Auth Verify API (for Gateway / Microservices) ====================
+
+type authVerifyTokenReq struct {
+	Token string `json:"token"`
+}
+
+type ownedBot struct {
+	UID  string `json:"uid"`
+	Name string `json:"name"`
+}
+
+type authVerifyTokenResp struct {
+	UID       string     `json:"uid"`
+	Name      string     `json:"name"`
+	Role      string     `json:"role"`
+	OwnedBots []ownedBot `json:"owned_bots"`
+}
+
+// authVerifyToken validates a user token and returns identity + owned bots.
+func (u *User) authVerifyToken(c *wkhttp.Context) {
+	var req authVerifyTokenReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseErrorf("invalid request: %v", err)
+		return
+	}
+	if req.Token == "" {
+		c.ResponseError(errors.New("token is required"))
+		return
+	}
+
+	// Same Redis lookup as AuthMiddleware: "token:<value>" → "uid@name@role"
+	uidAndName := wkhttp.GetLoginUID(req.Token, u.ctx.GetConfig().Cache.TokenCachePrefix, u.ctx.Cache())
+	if strings.TrimSpace(uidAndName) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid or expired token"})
+		return
+	}
+
+	parts := strings.SplitN(uidAndName, "@", 3)
+	if len(parts) < 2 {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "malformed token data"})
+		return
+	}
+
+	resp := authVerifyTokenResp{
+		UID:       parts[0],
+		Name:      parts[1],
+		OwnedBots: make([]ownedBot, 0),
+	}
+	if len(parts) > 2 {
+		resp.Role = parts[2]
+	}
+
+	// Query owned bots: robot.creator_uid = uid
+	type botRow struct {
+		RobotID string `db:"robot_id"`
+		Name    string `db:"name"`
+	}
+	var bots []botRow
+	_, err := u.db.session.SelectBySql(
+		"SELECT r.robot_id, IFNULL(u.name,'') as name FROM robot r "+
+			"INNER JOIN `user` u ON r.robot_id = u.uid "+
+			"WHERE r.creator_uid = ? AND r.status = 1", resp.UID,
+	).Load(&bots)
+	if err == nil {
+		for _, b := range bots {
+			resp.OwnedBots = append(resp.OwnedBots, ownedBot{UID: b.RobotID, Name: b.Name})
+		}
+	}
+
+	c.Response(resp)
+}
+
+type authVerifyBotReq struct {
+	BotToken string `json:"bot_token"`
+}
+
+type authVerifyBotResp struct {
+	BotUID    string `json:"bot_uid"`
+	BotName   string `json:"bot_name"`
+	OwnerUID  string `json:"owner_uid"`
+	OwnerName string `json:"owner_name"`
+	SpaceID   string `json:"space_id"`
+}
+
+// authVerifyBot validates a Bot token (BotFather Bearer token) and returns bot + owner info.
+func (u *User) authVerifyBot(c *wkhttp.Context) {
+	var req authVerifyBotReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseErrorf("invalid request: %v", err)
+		return
+	}
+	if req.BotToken == "" {
+		c.ResponseError(errors.New("bot_token is required"))
+		return
+	}
+
+	// Query robot by bot_token
+	var botInfo struct {
+		RobotID    string `db:"robot_id"`
+		CreatorUID string `db:"creator_uid"`
+	}
+	err := u.db.session.Select("robot_id", "IFNULL(creator_uid,'') as creator_uid").
+		From("robot").
+		Where("bot_token = ? AND bot_token != '' AND status = 1", req.BotToken).
+		LoadOne(&botInfo)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid bot token"})
+		return
+	}
+
+	// Get bot display name
+	botName := botInfo.RobotID
+	botUser, _ := u.userService.GetUser(botInfo.RobotID)
+	if botUser != nil {
+		botName = botUser.Name
+	}
+
+	// Get owner name
+	ownerName := ""
+	if botInfo.CreatorUID != "" {
+		ownerUser, _ := u.userService.GetUser(botInfo.CreatorUID)
+		if ownerUser != nil {
+			ownerName = ownerUser.Name
+		}
+	}
+
+	// Get bot's Space (first active space_member record)
+	var spaceID string
+	_ = u.db.session.Select("space_id").From("space_member").
+		Where("uid = ? AND status = 1", botInfo.RobotID).
+		OrderDir("created_at", false).
+		Limit(1).
+		LoadOne(&spaceID)
+
+	c.Response(authVerifyBotResp{
+		BotUID:    botInfo.RobotID,
+		BotName:   botName,
+		OwnerUID:  botInfo.CreatorUID,
+		OwnerName: ownerName,
+		SpaceID:   spaceID,
+	})
 }
