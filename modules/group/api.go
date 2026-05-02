@@ -1507,16 +1507,28 @@ func (g *Group) managerAdd(c *wkhttp.Context) {
 		return
 	}
 
-	// Verify all target UIDs are current group members before promoting
+	// Verify all target UIDs are current group members before promoting.
+	// 同时拦截外部成员 (is_external=1)：外部成员不得被提拔为管理员，
+	// 否则会获得 groupForbidden / memberRemove / managerAdd/Remove /
+	// blacklist / transferGrouper 等 8 项敏感操作权限
+	// (YUJ-231 / GH#1289，ReviewBot YUJ-230 P1)。
 	for _, uid := range memberUIDs {
-		isMember, err := g.db.ExistMember(uid, groupNo)
+		targetMember, err := g.db.QueryMemberWithUID(uid, groupNo)
 		if err != nil {
 			g.Error("查询群成员关系失败", zap.String("uid", uid), zap.Error(err))
 			c.ResponseError(errors.New("查询群成员关系失败"))
 			return
 		}
-		if !isMember {
+		if targetMember == nil {
 			c.ResponseError(errors.New("目标用户不是群成员，无法设为管理员"))
+			return
+		}
+		if targetMember.IsExternal == 1 {
+			g.Warn("拒绝将外部成员提拔为管理员",
+				zap.String("group_no", groupNo),
+				zap.String("target_uid", uid),
+				zap.String("operator", loginUID))
+			c.ResponseErrorWithStatus(errors.New("不能提拔外部成员为管理员"), http.StatusForbidden)
 			return
 		}
 	}
@@ -2221,6 +2233,16 @@ func (g *Group) transferGrouper(c *wkhttp.Context) {
 	}
 	if toMember == nil {
 		c.ResponseError(errors.New("转让的用户没在群内！"))
+		return
+	}
+	// 拦截将群主转让给外部成员 (is_external=1)：群主拥有全部敏感操作权限，
+	// 绝不能落到外部成员手上 (YUJ-231 / GH#1289)。
+	if toMember.IsExternal == 1 {
+		g.Warn("拒绝将群主转让给外部成员",
+			zap.String("group_no", groupNo),
+			zap.String("to_uid", toUID),
+			zap.String("operator", loginUID))
+		c.ResponseErrorWithStatus(errors.New("不能将群主转让给外部成员"), http.StatusForbidden)
 		return
 	}
 	forbiddenExpirTime := toMember.ForbiddenExpirTime

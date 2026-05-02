@@ -102,9 +102,14 @@ func (d *DB) queryMemberWithVercodes(vercodes []string) ([]*MemberGroupDetailMod
 }
 
 // QueryIsGroupManagerOrCreator 是否是群管理者或创建者
+//
+// Fail-safe 过滤 is_external=0：外部成员即使在 DB 中残留 role=creator/manager
+// （历史脏数据或绕过 managerAdd 入口校验写入），也不视为该群的管理者。
+// 与 managerAdd / transferGrouper 的前置 is_external 校验构成双层防御
+// （YUJ-231 / GH#1289，ReviewBot YUJ-230 P1）。
 func (d *DB) QueryIsGroupManagerOrCreator(groupNo string, uid string) (bool, error) {
 	var count int64
-	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and uid=? and is_deleted=0 and (role=? or role=?)", groupNo, uid, MemberRoleCreator, MemberRoleManager).Load(&count)
+	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and uid=? and is_deleted=0 and is_external=0 and (role=? or role=?)", groupNo, uid, MemberRoleCreator, MemberRoleManager).Load(&count)
 	return count > 0, err
 }
 
