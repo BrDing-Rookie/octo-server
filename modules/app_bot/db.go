@@ -158,14 +158,16 @@ func (d *appBotDB) queryPublishedBots() ([]*appBotModel, error) {
 
 // queryAvailableBots returns bots available to a given user (each scope capped at 100).
 func (d *appBotDB) queryAvailableBots(loginUID, spaceIDFilter string) ([]*appBotModel, error) {
-	// Explicit column list excludes token to prevent accidental exposure
+	// Explicit column list excludes token to prevent accidental exposure.
+	// JOIN branch needs ab.-prefixed columns to disambiguate id/uid shared with space_member.
 	const cols = "id, uid, display_name, description, avatar, scope, space_id, status, welcome_msg, created_by, created_at, updated_at"
+	const abCols = "ab.id, ab.uid, ab.display_name, ab.description, ab.avatar, ab.scope, ab.space_id, ab.status, ab.welcome_msg, ab.created_by, ab.created_at, ab.updated_at"
 	var bots []*appBotModel
 	if spaceIDFilter != "" {
 		_, err := d.session.SelectBySql(`
 			(SELECT `+cols+` FROM app_bot WHERE scope='platform' AND status=1 LIMIT 100)
 			UNION ALL
-			(SELECT `+cols+` FROM app_bot ab
+			(SELECT `+abCols+` FROM app_bot ab
 				INNER JOIN space_member sm ON ab.space_id = sm.space_id
 				WHERE sm.uid = ? AND sm.status = 1
 				AND ab.scope = 'space' AND ab.status = 1
@@ -177,7 +179,7 @@ func (d *appBotDB) queryAvailableBots(loginUID, spaceIDFilter string) ([]*appBot
 	_, err := d.session.SelectBySql(`
 		(SELECT `+cols+` FROM app_bot WHERE scope='platform' AND status=1 LIMIT 100)
 		UNION ALL
-		(SELECT `+cols+` FROM app_bot ab
+		(SELECT `+abCols+` FROM app_bot ab
 			INNER JOIN space_member sm ON ab.space_id = sm.space_id
 			WHERE sm.uid = ? AND sm.status = 1
 			AND ab.scope = 'space' AND ab.status = 1
