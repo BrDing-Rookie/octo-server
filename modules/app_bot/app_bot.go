@@ -116,6 +116,7 @@ func (ab *AppBot) Route(r *wkhttp.WKHttp) {
 		adminAPI.PUT("/:id", ab.updateBot)
 		adminAPI.DELETE("/:id", ab.deleteBot)
 		adminAPI.POST("/:id/token", ab.rotateToken)
+		adminAPI.POST("/:id/token/reveal", ab.revealToken)
 		adminAPI.POST("/:id/publish", ab.publishBot)
 		adminAPI.POST("/:id/unpublish", ab.unpublishBot)
 	}
@@ -129,6 +130,7 @@ func (ab *AppBot) Route(r *wkhttp.WKHttp) {
 		spaceAPI.PUT("/:id", ab.updateBot)
 		spaceAPI.DELETE("/:id", ab.deleteBot)
 		spaceAPI.POST("/:id/token", ab.rotateToken)
+		spaceAPI.POST("/:id/token/reveal", ab.revealToken)
 		spaceAPI.POST("/:id/publish", ab.publishBot)
 		spaceAPI.POST("/:id/unpublish", ab.unpublishBot)
 	}
@@ -730,6 +732,44 @@ func (ab *AppBot) rotateToken(c *wkhttp.Context) {
 	}
 
 	c.Response(gin.H{"token": newToken})
+}
+
+// revealToken handles POST /v1/admin/app_bot/:id/token/reveal and POST /v1/space/:space_id/app_bot/:id/token/reveal.
+func (ab *AppBot) revealToken(c *wkhttp.Context) {
+	spaceID := c.Param("space_id")
+	id := c.Param("id")
+
+	if spaceID != "" {
+		if err := ab.checkSpaceAdmin(c, spaceID); err != nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": err.Error()})
+			return
+		}
+	} else {
+		if err := c.CheckLoginRoleIsSuperAdmin(); err != nil {
+			c.ResponseError(err)
+			return
+		}
+	}
+
+	bot, err := ab.db.queryBotByID(id)
+	if err != nil || bot == nil {
+		c.JSON(http.StatusNotFound, gin.H{"msg": "bot not found"})
+		return
+	}
+
+	if spaceID != "" && (bot.Scope != "space" || bot.SpaceID != spaceID) {
+		c.JSON(http.StatusNotFound, gin.H{"msg": "bot not found"})
+		return
+	}
+
+	ab.Info("token revealed",
+		zap.String("bot_id", id),
+		zap.String("operator", c.GetLoginUID()),
+		zap.String("scope", bot.Scope),
+		zap.String("space_id", spaceID),
+	)
+
+	c.Response(gin.H{"token": bot.Token})
 }
 
 // publishBot handles POST /v1/admin/app_bot/:id/publish and POST /v1/space/:space_id/app_bot/:id/publish.
