@@ -48,6 +48,10 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/statistics"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/thread"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/user"
+	// app_bot and bot_api query user/robot tables at runtime; app_bot
+	// also imports bot_api, so register bot_api before app_bot.
+	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_api"
+	_ "github.com/Mininglamp-OSS/octo-server/modules/app_bot"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/voice"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/webhook"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/workplace"
