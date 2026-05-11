@@ -17,7 +17,19 @@ paths:
       tags:
         - "conversation"
       summary: "同步离线最近会话"
-      description: "同步离线最近会话"
+      description: |
+        同步离线最近会话。
+
+        服务端过滤规则：
+        - 已删除子区（`status=3`）不返回。
+        - **已归档子区（`status=2`）不返回**（PR #1377 起生效，配合 #1376 的 server 端 cron）。
+          archived 子区在收到新消息时由后端 `RecordMessageAndReactivate` 自动复活为 active，
+          下一次 sync 会重新出现；前端"已归档列表"入口请使用
+          `GET /v1/groups/{group_no}/threads?status=archived`。
+        - 当前用户已退群的群会话不返回。
+
+        cursor 推进基于过滤前的 raw conversations，确保被过滤掉的会话不会让游标卡住
+        导致客户端反复拉同一批数据。
       operationId: "sync conversation"
       consumes:
         - "application/json"

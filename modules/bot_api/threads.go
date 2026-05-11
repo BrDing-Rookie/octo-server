@@ -117,7 +117,7 @@ func (ba *BotAPI) botListThreads(c *wkhttp.Context) {
 		pageIndex, pageSize = 1, thread.MaxThreadPageSize
 	}
 
-	threads, total, err := ba.threadService.GetThreads(groupNo, pageIndex, pageSize)
+	threads, total, err := ba.threadService.GetThreads(groupNo, nil, pageIndex, pageSize)
 	if err != nil {
 		ba.Error("获取子区列表失败", zap.Error(err), zap.String("groupNo", groupNo))
 		c.ResponseError(err)

@@ -90,9 +90,16 @@ func (d *DB) QueryByGroupNoAndShortID(groupNo, shortID string) (*Model, error) {
 	return model, err
 }
 
-// QueryByGroupNo 分页查询群下的活跃子区
+// QueryByGroupNo 分页查询群下的活跃子区。
+// 为兼容旧调用方保留 active-only 语义；如需按其他状态查询请用 QueryByGroupNoWithStatus。
 func (d *DB) QueryByGroupNo(groupNo string, offset, limit int64) ([]*Model, error) {
-	if limit <= 0 {
+	return d.QueryByGroupNoWithStatus(groupNo, []int{ThreadStatusActive}, offset, limit)
+}
+
+// QueryByGroupNoWithStatus 分页查询群下指定 status 集合的子区。
+// statuses 为空时返回空列表，避免误拉所有数据（含 deleted）。
+func (d *DB) QueryByGroupNoWithStatus(groupNo string, statuses []int, offset, limit int64) ([]*Model, error) {
+	if limit <= 0 || len(statuses) == 0 {
 		return []*Model{}, nil
 	}
 	if offset < 0 {
@@ -100,7 +107,7 @@ func (d *DB) QueryByGroupNo(groupNo string, offset, limit int64) ([]*Model, erro
 	}
 	var models []*Model
 	_, err := d.session.Select("*").From("thread").
-		Where("group_no=? AND status=?", groupNo, ThreadStatusActive).
+		Where("group_no=? AND status IN ?", groupNo, statuses).
 		OrderBy("created_at DESC, id DESC").
 		Offset(uint64(offset)).
 		Limit(uint64(limit)).
@@ -108,11 +115,20 @@ func (d *DB) QueryByGroupNo(groupNo string, offset, limit int64) ([]*Model, erro
 	return models, err
 }
 
-// CountByGroupNo 统计群下活跃子区总数
+// CountByGroupNo 统计群下活跃子区总数。
 func (d *DB) CountByGroupNo(groupNo string) (int64, error) {
+	return d.CountByGroupNoWithStatus(groupNo, []int{ThreadStatusActive})
+}
+
+// CountByGroupNoWithStatus 统计群下指定 status 集合的子区总数。
+// statuses 为空时返回 0，与 QueryByGroupNoWithStatus 对齐。
+func (d *DB) CountByGroupNoWithStatus(groupNo string, statuses []int) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
 	var count int64
 	err := d.session.Select("count(*)").From("thread").
-		Where("group_no=? AND status=?", groupNo, ThreadStatusActive).
+		Where("group_no=? AND status IN ?", groupNo, statuses).
 		LoadOne(&count)
 	return count, err
 }
@@ -151,6 +167,24 @@ func (d *DB) QueryNonDeletedShortIDs(shortIDs []string) ([]string, error) {
 	var result []string
 	_, err := d.session.Select("short_id").From("thread").
 		Where("short_id IN ? AND status != ?", shortIDs, ThreadStatusDeleted).
+		Load(&result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// QueryActiveShortIDs 批量查询 status=active 的子区 shortID。
+// 用于 /v1/conversation/sync 过滤路径：archived/deleted 子区都不返回给客户端。
+// archived 子区由 server-side cron (#1376) 维护；收到消息时通过
+// RecordMessageAndReactivate 自动复活为 active，重新出现在 sync 列表里。
+func (d *DB) QueryActiveShortIDs(shortIDs []string) ([]string, error) {
+	if len(shortIDs) == 0 {
+		return []string{}, nil
+	}
+	var result []string
+	_, err := d.session.Select("short_id").From("thread").
+		Where("short_id IN ? AND status=?", shortIDs, ThreadStatusActive).
 		Load(&result)
 	if err != nil {
 		return nil, err

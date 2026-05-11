@@ -270,7 +270,15 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 		pageIndex, pageSize = 1, MaxThreadPageSize
 	}
 
-	threads, total, err := t.service.GetThreads(groupNo, pageIndex, pageSize)
+	// ?status= 决定返回子区状态集合：不传或 active=只看活跃；archived=只看已归档；
+	// all=活跃+已归档（不含 deleted）。前端"已归档"入口走 status=archived。
+	statuses, err := parseListThreadStatuses(c.Query("status"))
+	if err != nil {
+		c.ResponseError(err)
+		return
+	}
+
+	threads, total, err := t.service.GetThreads(groupNo, statuses, pageIndex, pageSize)
 	if err != nil {
 		t.Error("获取子区列表失败", zap.Error(err), zap.String("groupNo", groupNo))
 		c.ResponseError(err)
@@ -284,6 +292,23 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 		"count": total,
 		"list":  threads,
 	})
+}
+
+// parseListThreadStatuses 解析 listThreads 的 ?status= 入参。
+// 不传/active → [active]，archived → [archived]，all → [active, archived]。
+// 其它任何值返回 InvalidArgument 错误，避免静默退化为默认值放大客户端 bug。
+func parseListThreadStatuses(raw string) ([]int, error) {
+	switch raw {
+	case "", ListStatusActive:
+		return []int{ThreadStatusActive}, nil
+	case ListStatusArchived:
+		return []int{ThreadStatusArchived}, nil
+	case ListStatusAll:
+		return []int{ThreadStatusActive, ThreadStatusArchived}, nil
+	default:
+		// 不把 raw 原样回显，避免控制字符 / 超长输入污染 JSON 错误体 / 日志。
+		return nil, errors.New("invalid status: must be active, archived, or all")
+	}
 }
 
 // getThread 获取子区详情

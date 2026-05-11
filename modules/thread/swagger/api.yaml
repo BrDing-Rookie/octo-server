@@ -52,11 +52,16 @@ paths:
         - "thread"
       summary: "列出群下的子区（兼容模式）"
       description: |
-        按 created_at 降序返回群下的活跃子区。调用者必须是该群成员。
+        按 created_at 降序返回群下的子区，默认只返回 active 状态。调用者必须是该群成员。
 
         响应格式依据是否携带分页参数分流（向后兼容旧客户端）：
         - **未传** `page_index` / `page_size`：返回裸数组 `[threadResp, ...]`，最多 100 条（等同旧行为）。
         - **传入任一分页参数**：返回分页信封 `{count, list}`。
+
+        `?status=` 决定返回子区状态集合：
+        - 不传或 `active`：只返回 `status=1` 活跃子区（默认，保留旧行为）。
+        - `archived`：只返回 `status=2` 已归档子区。前端"已归档"入口走这个值。
+        - `all`：返回活跃+已归档（不含 deleted）。
       produces:
         - "application/json"
       parameters:
@@ -80,6 +85,15 @@ paths:
           minimum: 1
           maximum: 100
           description: "每页条数，默认 15，最大 100。超过 100 会被夹到 100；<=0 时取默认值 15（传入即触发信封格式）"
+        - in: "query"
+          name: "status"
+          type: string
+          required: false
+          enum: ["active", "archived", "all"]
+          default: "active"
+          description: |
+            子区状态过滤。`active`（默认，不传时等价）只返回活跃子区；`archived` 只返回已归档子区；
+            `all` 返回活跃+已归档（不含已删除）。传非法值返回 400。
       responses:
         200:
           description: |

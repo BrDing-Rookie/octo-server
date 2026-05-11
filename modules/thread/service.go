@@ -36,8 +36,9 @@ type IService interface {
 	CreateThread(req *CreateThreadReq) (*ThreadResp, error)
 	// UpdateName 修改子区名称
 	UpdateName(groupNo, shortID, operatorUID, name string) error
-	// GetThreads 分页获取群下的子区，同时返回总数
-	GetThreads(groupNo string, pageIndex, pageSize int64) ([]*ThreadResp, int64, error)
+	// GetThreads 分页获取群下的子区，同时返回总数。
+	// statuses 决定包含的 status 集合（active / archived / 二者）；nil 或空一律按 active。
+	GetThreads(groupNo string, statuses []int, pageIndex, pageSize int64) ([]*ThreadResp, int64, error)
 	// GetThread 获取子区详情，loginUID 非空时填充当前用户的 mute 状态
 	GetThread(groupNo, shortID, loginUID string) (*ThreadResp, error)
 	// ArchiveThread 归档子区
@@ -379,8 +380,8 @@ func (s *Service) UpdateName(groupNo, shortID, operatorUID, name string) error {
 	return nil
 }
 
-// GetThreads 分页获取群下的子区，同时返回总数
-func (s *Service) GetThreads(groupNo string, pageIndex, pageSize int64) ([]*ThreadResp, int64, error) {
+// GetThreads 分页获取群下的子区，同时返回总数。
+func (s *Service) GetThreads(groupNo string, statuses []int, pageIndex, pageSize int64) ([]*ThreadResp, int64, error) {
 	if pageIndex < 1 {
 		pageIndex = 1
 	}
@@ -390,8 +391,12 @@ func (s *Service) GetThreads(groupNo string, pageIndex, pageSize int64) ([]*Thre
 	if pageSize > MaxThreadPageSize {
 		pageSize = MaxThreadPageSize
 	}
+	// Defense-in-depth：API 层（parseListThreadStatuses）已经做了 allowlist，但 service
+	// 也可能被其它模块（bot_api / botfather / 未来的内部调用）直接调用。这里再做一次
+	// allowlist 归一，避免内部误传 ThreadStatusDeleted 把已删除子区透出。
+	statuses = sanitizeListStatuses(statuses)
 
-	total, err := s.db.CountByGroupNo(groupNo)
+	total, err := s.db.CountByGroupNoWithStatus(groupNo, statuses)
 	if err != nil {
 		return nil, 0, fmt.Errorf("count threads by group: %w", err)
 	}
@@ -400,7 +405,7 @@ func (s *Service) GetThreads(groupNo string, pageIndex, pageSize int64) ([]*Thre
 	}
 
 	offset := (pageIndex - 1) * pageSize
-	threads, err := s.db.QueryByGroupNo(groupNo, offset, pageSize)
+	threads, err := s.db.QueryByGroupNoWithStatus(groupNo, statuses, offset, pageSize)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query threads by group: %w", err)
 	}
@@ -1091,4 +1096,26 @@ func (s *Service) RemoveUserFromGroupThreads(groupNo, uid string) error {
 	}
 
 	return nil
+}
+
+// sanitizeListStatuses 把入参里只保留 listThreads 允许列出的 status（active / archived），
+// 去重；若过滤后为空（nil、空切片、或全是非法值如 deleted/未知码），fallback 到
+// [active]。即便 service 被旁路调用，也不会把 deleted 子区透出。
+func sanitizeListStatuses(statuses []int) []int {
+	seen := make(map[int]struct{}, 2)
+	out := make([]int, 0, 2)
+	for _, s := range statuses {
+		if s != ThreadStatusActive && s != ThreadStatusArchived {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return []int{ThreadStatusActive}
+	}
+	return out
 }

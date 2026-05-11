@@ -449,7 +449,13 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		for _, shortID := range threadChannelShortIDMap {
 			shortIDs = append(shortIDs, shortID)
 		}
-		activeIDs, err := co.threadDB.QueryNonDeletedShortIDs(shortIDs)
+		// PR-B (#1377): 只把 status=active 的子区放进白名单。archived 子区由 cron (#1376)
+		// 维护，被收消息时通过 RecordMessageAndReactivate 自动复活为 active，重新出现在
+		// 下一次 sync 中；deleted 子区永久剔除。
+		// fail-open：DB 查询失败时跳过子区过滤（threadFilterEnabled 保持 false），
+		// 宁可短暂把 archived/deleted 子区透出给客户端，也不阻塞用户的整批 sync。
+		// 与 PR-A 之前 QueryNonDeletedShortIDs 的策略一致。
+		activeIDs, err := co.threadDB.QueryActiveShortIDs(shortIDs)
 		if err != nil {
 			co.Error("查询有效子区失败！", zap.Error(err))
 		} else {
@@ -652,10 +658,10 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			}
 		}
 	}
-	var lastVersion int64 = req.Version
-	if len(syncUserConversationResps) > 0 {
-		lastVersion = syncUserConversationResps[len(syncUserConversationResps)-1].Version
-	}
+	// PR-B (#1377): cursor 必须基于 raw conversations 推进。服务端过滤掉的会话
+	// （archived 子区 / 已删除子区 / 当前用户已退群）可能正好是本批最高 version 的那条；
+	// 用过滤后列表的尾部 version 会让 cursor 卡在它前面，下次 sync 重复拉同一批。
+	lastVersion := maxConversationVersion(conversations, req.Version)
 	co.syncConversationResultCacheLock.Lock()
 	cacheVersion := co.syncConversationVersionMap[userKey]
 	if cacheVersion < lastVersion {

@@ -326,6 +326,109 @@ func TestListThreads_DBPagination(t *testing.T) {
 	assert.Equal(t, int64(5), count)
 }
 
+// TestListThreads_StatusFilter PR-B：listThreads 支持 ?status=active|archived|all
+func TestListThreads_StatusFilter(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	db := NewDB(ctx)
+	// 2 active + 3 archived + 1 deleted
+	mk := func(name string, status int) string {
+		shortID := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+		err := db.Insert(&Model{
+			ShortID: shortID, GroupNo: groupNo, Name: name,
+			CreatorUID: testutil.UID, Status: status, Version: 1,
+		})
+		assert.NoError(t, err)
+		return shortID
+	}
+	mk("A1", ThreadStatusActive)
+	mk("A2", ThreadStatusActive)
+	mk("R1", ThreadStatusArchived)
+	mk("R2", ThreadStatusArchived)
+	mk("R3", ThreadStatusArchived)
+	mk("D1", ThreadStatusDeleted)
+
+	get := func(query string) *threadListResp {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?page_size=100"+query, nil)
+		req.Header.Set("token", testutil.Token)
+		s.GetRoute().ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		var resp threadListResp
+		util.ReadJsonByByte(w.Body.Bytes(), &resp)
+		return &resp
+	}
+
+	// 默认（不传 status）只返回 active
+	def := get("")
+	assert.Equal(t, int64(2), def.Count)
+	assert.Len(t, def.List, 2)
+
+	// ?status=active 等价默认
+	act := get("&status=active")
+	assert.Equal(t, int64(2), act.Count)
+	assert.Len(t, act.List, 2)
+
+	// ?status=archived 只返回 archived
+	arch := get("&status=archived")
+	assert.Equal(t, int64(3), arch.Count)
+	assert.Len(t, arch.List, 3)
+	for _, it := range arch.List {
+		assert.Equal(t, ThreadStatusArchived, it.Status)
+	}
+
+	// ?status=all 返回 active + archived（不含 deleted）
+	all := get("&status=all")
+	assert.Equal(t, int64(5), all.Count)
+	assert.Len(t, all.List, 5)
+	for _, it := range all.List {
+		assert.NotEqual(t, ThreadStatusDeleted, it.Status)
+	}
+
+	// 非法 status 值 → 400
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?status=bogus", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestListThreads_StatusFilter_BackwardCompat 不传 page_index/page_size 但传 status=archived，
+// 仍走兼容旧客户端的裸数组格式（向后兼容性回归）。
+func TestListThreads_StatusFilter_BackwardCompat(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	db := NewDB(ctx)
+	for i, st := range []int{ThreadStatusActive, ThreadStatusArchived, ThreadStatusArchived} {
+		err := db.Insert(&Model{
+			ShortID:    fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64()),
+			GroupNo:    groupNo,
+			Name:       fmt.Sprintf("t%d", i),
+			CreatorUID: testutil.UID,
+			Status:     st,
+			Version:    1,
+		})
+		assert.NoError(t, err)
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?status=archived", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body := strings.TrimSpace(w.Body.String())
+	assert.True(t, strings.HasPrefix(body, "["), "不传分页参数时即使带 status= 也应返回裸数组，实际: %s", body)
+	var list []*ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &list)
+	assert.Len(t, list, 2)
+	for _, it := range list {
+		assert.Equal(t, ThreadStatusArchived, it.Status)
+	}
+}
+
 // ==================== 获取子区详情测试 ====================
 
 func TestGetThread(t *testing.T) {

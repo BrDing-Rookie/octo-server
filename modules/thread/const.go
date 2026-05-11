@@ -32,3 +32,10 @@ const (
 	DefaultThreadPageSize int64 = 15
 	MaxThreadPageSize     int64 = 100
 )
+
+// listThreads ?status= 入参合法值。
+const (
+	ListStatusActive   = "active"
+	ListStatusArchived = "archived"
+	ListStatusAll      = "all"
+)

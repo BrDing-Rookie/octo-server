@@ -417,6 +417,120 @@ func TestQueryNonDeletedShortIDs(t *testing.T) {
 	assert.Len(t, emptyResult, 0)
 }
 
+// TestQueryActiveShortIDs PR-B：sync 过滤路径只保留 active 子区（archived/deleted 都丢）
+func TestQueryActiveShortIDs(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	db := NewDB(ctx)
+	shortIDActive := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+	shortIDArchived := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+	shortIDDeleted := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+
+	for _, m := range []*Model{
+		{ShortID: shortIDActive, GroupNo: "00000000000000000000000000000001", Name: "active", CreatorUID: "u1", Status: ThreadStatusActive, Version: 1},
+		{ShortID: shortIDArchived, GroupNo: "00000000000000000000000000000001", Name: "archived", CreatorUID: "u1", Status: ThreadStatusArchived, Version: 1},
+		{ShortID: shortIDDeleted, GroupNo: "00000000000000000000000000000001", Name: "deleted", CreatorUID: "u1", Status: ThreadStatusDeleted, Version: 1},
+	} {
+		assert.NoError(t, db.Insert(m))
+	}
+
+	got, err := db.QueryActiveShortIDs([]string{shortIDActive, shortIDArchived, shortIDDeleted})
+	assert.NoError(t, err)
+	assert.Len(t, got, 1)
+	assert.Contains(t, got, shortIDActive)
+	assert.NotContains(t, got, shortIDArchived)
+	assert.NotContains(t, got, shortIDDeleted)
+
+	empty, err := db.QueryActiveShortIDs(nil)
+	assert.NoError(t, err)
+	assert.Len(t, empty, 0)
+}
+
+// TestQueryByGroupNoWithStatus PR-B：群子区列表支持按 status 集合筛选
+func TestQueryByGroupNoWithStatus(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	db := NewDB(ctx)
+	groupNo := "00000000000000000000000000000010"
+	mk := func(name string, status int) *Model {
+		return &Model{
+			ShortID:    fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64()),
+			GroupNo:    groupNo,
+			Name:       name,
+			CreatorUID: "u1",
+			Status:     status,
+			Version:    1,
+		}
+	}
+	for _, m := range []*Model{
+		mk("a1", ThreadStatusActive),
+		mk("a2", ThreadStatusActive),
+		mk("r1", ThreadStatusArchived),
+		mk("r2", ThreadStatusArchived),
+		mk("d1", ThreadStatusDeleted),
+	} {
+		assert.NoError(t, db.Insert(m))
+	}
+
+	cases := []struct {
+		name     string
+		statuses []int
+		want     int
+	}{
+		{"default active only", []int{ThreadStatusActive}, 2},
+		{"archived only", []int{ThreadStatusArchived}, 2},
+		{"active+archived", []int{ThreadStatusActive, ThreadStatusArchived}, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, qerr := db.QueryByGroupNoWithStatus(groupNo, tc.statuses, 0, 100)
+			assert.NoError(t, qerr)
+			assert.Len(t, rows, tc.want)
+			total, cerr := db.CountByGroupNoWithStatus(groupNo, tc.statuses)
+			assert.NoError(t, cerr)
+			assert.Equal(t, int64(tc.want), total)
+		})
+	}
+
+	// 空 status 列表：返回空（保护性，避免误拉所有数据）
+	rows, err := db.QueryByGroupNoWithStatus(groupNo, []int{}, 0, 100)
+	assert.NoError(t, err)
+	assert.Len(t, rows, 0)
+	total, err := db.CountByGroupNoWithStatus(groupNo, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+}
+
+// TestSanitizeListStatuses defense-in-depth：service 层 status 白名单归一。
+// 即便 service 被旁路调用，deleted / 未知码也不会被传到 DB。
+func TestSanitizeListStatuses(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []int
+		want []int
+	}{
+		{"nil → active", nil, []int{ThreadStatusActive}},
+		{"empty → active", []int{}, []int{ThreadStatusActive}},
+		{"active passthrough", []int{ThreadStatusActive}, []int{ThreadStatusActive}},
+		{"archived passthrough", []int{ThreadStatusArchived}, []int{ThreadStatusArchived}},
+		{"active+archived passthrough", []int{ThreadStatusActive, ThreadStatusArchived}, []int{ThreadStatusActive, ThreadStatusArchived}},
+		{"deleted stripped → active", []int{ThreadStatusDeleted}, []int{ThreadStatusActive}},
+		{"unknown code stripped → active", []int{99}, []int{ThreadStatusActive}},
+		{"mixed legit + deleted → only legit", []int{ThreadStatusActive, ThreadStatusDeleted}, []int{ThreadStatusActive}},
+		{"dedupe preserves order", []int{ThreadStatusArchived, ThreadStatusActive, ThreadStatusArchived}, []int{ThreadStatusArchived, ThreadStatusActive}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeListStatuses(tc.in)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // ==================== DB 层 UpdateMessageStats 测试 ====================
 
 func TestUpdateMessageStats(t *testing.T) {
