@@ -13,7 +13,7 @@ require (
 	github.com/apistd/uni-go-sdk v0.0.2
 	github.com/coreos/go-oidc/v3 v3.9.0
 	github.com/disintegration/imaging v1.6.2
-	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260321025444-1229d3021472
+	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260511181833-20fb82b4d8c9
 	github.com/eapache/queue v1.1.0
 	github.com/ethereum/go-ethereum v1.12.2
 	github.com/gin-gonic/gin v1.9.1

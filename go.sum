@@ -158,8 +158,8 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
 github.com/disintegration/imaging v1.6.2 h1:w1LecBlG2Lnp8B3jk5zSuNqd7b4DXhcjwek1ei82L+c=
 github.com/disintegration/imaging v1.6.2/go.mod h1:44/5580QXChDfwIclfc/PCwrr44amcmDAg8hxG0Ewe4=
-github.com/Mininglamp-OSS/octo-lib v0.0.0-20260321025444-1229d3021472 h1:+OTasfnpJlTD35LaN46g72MUlUKC0VwVldhYYjqWVQQ=
-github.com/Mininglamp-OSS/octo-lib v0.0.0-20260321025444-1229d3021472/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260511181833-20fb82b4d8c9 h1:PmnyoIBA0xSdCBtz33C5TY80OXQfVIxTJGwqU/MoDuM=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260511181833-20fb82b4d8c9/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/eapache/queue v1.1.0 h1:YOEu7KNc61ntiQlcEeUIoDTJ2o8mQznoNvUhiigpIqc=
