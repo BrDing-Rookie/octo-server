@@ -290,7 +290,7 @@ func (ba *BotAPI) botUploadPresigned(c *wkhttp.Context) {
 		return
 	}
 
-	c.Response(gin.H{
+	resp := gin.H{
 		"method":      "PUT",
 		"uploadUrl":   uploadURL,
 		"downloadUrl": downloadURL,
@@ -299,5 +299,13 @@ func (ba *BotAPI) botUploadPresigned(c *wkhttp.Context) {
 		"expiresIn":   int(expiry.Seconds()),
 		"expiredTime": time.Now().Add(expiry).Unix(),
 		"maxFileSize": fileSize,
-	})
+	}
+	// Content-Disposition is signed into the canonical headers on
+	// SigV4 backends (MinIO/COS), so the browser MUST echo this exact
+	// value at PUT time or the gateway returns 403 SignatureDoesNotMatch.
+	// Mirror the main file endpoint at modules/file/api.go.
+	if contentDisposition != "" {
+		resp["contentDisposition"] = contentDisposition
+	}
+	c.Response(resp)
 }
