@@ -243,8 +243,10 @@ func (sm *ServiceMinio) newClientForEndpoint(baseURL string) (*minio.Client, err
 // presigned URLs. Resolution order:
 //
 //  1. `cfg.Minio.DownloadURL` — the documented browser-facing endpoint.
-//     Operators behind nginx or running with split internal / external
-//     hosts SHOULD set this.
+//     Operators running behind a reverse proxy or with split internal /
+//     external hosts SHOULD set this. The value MUST be a `scheme://host:port`
+//     URL with no path component; see `validatePublicDownloadURL` for the
+//     rationale.
 //  2. `cfg.Minio.UploadURL` — fallback when DownloadURL is empty. Logged
 //     as a warning because in any non-trivial deployment this is the
 //     server-internal hostname (e.g. a Docker service name) which the
@@ -270,6 +272,43 @@ func (sm *ServiceMinio) publicEndpoint() string {
 	}
 	sm.Warn("minio.DownloadURL 与 UploadURL 都未设置，预签名URL退回到 minio.URL")
 	return strings.TrimSpace(minioConfig.URL)
+}
+
+// validatePublicDownloadURL enforces the host:port-only contract on
+// `cfg.Minio.DownloadURL`. SigV4 covers `host` and the canonical URI in
+// the signed headers; any reverse-proxy path-strip between the browser
+// and the MinIO server will rewrite the canonical URI mid-flight and
+// produce SignatureDoesNotMatch on every request. There is no clean way
+// to keep a path prefix working under standard nginx `proxy_pass <upstream>/`
+// semantics (which is the documented and idiomatic shape for path-routed
+// deployments), so we explicitly reject it at sign time rather than
+// silently produce broken URLs.
+//
+// Accepted shapes:
+//   - empty string (caller falls back to UploadURL / URL)
+//   - "scheme://host[:port]" with no path
+//   - "scheme://host[:port]/" — single trailing slash, treated as no path
+//
+// Rejected: any URL whose path is something other than "" or "/", e.g.
+// "https://octo.example.com/minio". For path-proxied deployments the
+// fix is to expose the MinIO API directly (subdomain + DNS, or a
+// dedicated host port) rather than route it through a path prefix.
+func validatePublicDownloadURL(rawURL string) error {
+	v := strings.TrimSpace(rawURL)
+	if v == "" {
+		return nil
+	}
+	parsed, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("minio.downloadURL 不是合法 URL: %q: %w", rawURL, err)
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf(
+			"minio.downloadURL must be a host:port URL without a path prefix; "+
+				"for path-proxied deployments, expose the MinIO API directly instead "+
+				"(got %q)", rawURL)
+	}
+	return nil
 }
 
 // validatePresignObjectKey rejects object keys that would produce a
@@ -304,6 +343,9 @@ func validatePresignObjectKey(objectKey string) error {
 // runs against the internal client because it needs network reachability,
 // not signature validity for the browser.
 func (sm *ServiceMinio) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+	if err := validatePublicDownloadURL(sm.ctx.GetConfig().Minio.DownloadURL); err != nil {
+		return "", "", err
+	}
 	internalClient, err := sm.newClient()
 	if err != nil {
 		return "", "", err
@@ -357,6 +399,9 @@ func (sm *ServiceMinio) PresignedPutURL(objectPath string, contentType string, c
 // (`publicEndpoint`); no post-sign host rewriting is performed. MinIO 默认
 // bucket 为公共读，但鉴权模式下也通过此方法签发。
 func (sm *ServiceMinio) PresignedGetURL(objectPath string, filename string, disposition string, expires time.Duration) (string, error) {
+	if err := validatePublicDownloadURL(sm.ctx.GetConfig().Minio.DownloadURL); err != nil {
+		return "", err
+	}
 	client, err := sm.newPublicClient()
 	if err != nil {
 		return "", err
