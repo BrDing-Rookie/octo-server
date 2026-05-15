@@ -44,6 +44,22 @@ wukongIM:
   managerToken: ""
 
 # ---------- Object storage (MinIO, S3-compatible) ----------------------------
+# Presigned-URL support matrix (current as of the file/presigned-URL implementation):
+#
+#   fileService value | presigned PUT (browser direct upload) | presigned GET (signed download)
+#   ------------------+---------------------------------------+--------------------------------
+#   "minio"           | yes — direct PUT signed by minio-go   | yes — signed GET via minio-go
+#   "tencentCOS"      | yes — direct PUT signed by minio-go   | yes — signed GET via minio-go
+#   "aliyunOSS"       | yes — direct PUT signed by OSS SDK    | yes — signed GET via OSS SDK
+#   "qiniu"           | no  — Qiniu uploads use a token+form  | yes — MakePrivateURLv2 signed URL
+#                     |       model that does not map to a    |
+#                     |       single PUT URL                  |
+#   "seaweedFS"       | no  — no presign primitive in SDK     | no  — public reads are unsigned
+#
+# Fallback when a backend does not support a presigned operation: the server
+# returns a clear error from the corresponding endpoint, and clients should
+# fall back to the regular server-side upload flow (POST /file/upload) or
+# unsigned DownloadURL. Switch to MinIO/COS/OSS for browser-direct upload.
 fileService: "minio"
 minio:
   url: "http://minio:9000"
