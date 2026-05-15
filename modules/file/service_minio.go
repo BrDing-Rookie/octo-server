@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -354,7 +355,22 @@ func validatePresignObjectKey(objectKey string) error {
 // resulting URL to be valid as-is from a browser. Bucket bootstrap still
 // runs against the internal client because it needs network reachability,
 // not signature validity for the browser.
-func (sm *ServiceMinio) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+//
+// `fileSize` is signed into the canonical-headers section as
+// `Content-Length`. The browser MUST echo the same Content-Length on its
+// PUT (browsers compute this automatically from the request body length),
+// and the storage gateway rejects any mismatch with
+// SignatureDoesNotMatch. This is the server-side enforcement of the
+// upload size cap on the presigned path: a caller cannot exceed the
+// signed budget without invalidating the URL — closes the size-bypass
+// security gap that the multipart `uploadFile` handler closes via
+// `http.MaxBytesReader` + `MaxFileSize` on the request body. Pass a
+// non-positive `fileSize` and the function returns an error rather than
+// silently producing an unbounded URL.
+func (sm *ServiceMinio) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+	if fileSize <= 0 {
+		return "", "", fmt.Errorf("预签名上传必须提供正向的 fileSize（字节数），用于在签名中固定 Content-Length")
+	}
 	if err := validatePublicDownloadURL(sm.ctx.GetConfig().Minio.DownloadURL); err != nil {
 		return "", "", err
 	}
@@ -379,19 +395,20 @@ func (sm *ServiceMinio) PresignedPutURL(objectPath string, contentType string, c
 		return "", "", fmt.Errorf("预签名上传前的目录引导失败: %w", err)
 	}
 
-	var presigned *url.URL
-	if contentDisposition != "" || contentType != "" {
-		headers := http.Header{}
-		if contentType != "" {
-			headers.Set("Content-Type", contentType)
-		}
-		if contentDisposition != "" {
-			headers.Set("Content-Disposition", contentDisposition)
-		}
-		presigned, err = publicClient.PresignHeader(ctx, http.MethodPut, bucketName, objectKey, expires, nil, headers)
-	} else {
-		presigned, err = publicClient.PresignedPutObject(ctx, bucketName, objectKey, expires)
+	// Always go through PresignHeader so Content-Length lands in the
+	// signed headers — without that the gateway would happily accept a
+	// PUT of any size against the URL. Content-Type / Content-Disposition
+	// piggy-back on the same path so the per-header behaviour stays
+	// consistent with the rest of the file module.
+	headers := http.Header{}
+	headers.Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	if contentType != "" {
+		headers.Set("Content-Type", contentType)
 	}
+	if contentDisposition != "" {
+		headers.Set("Content-Disposition", contentDisposition)
+	}
+	presigned, err := publicClient.PresignHeader(ctx, http.MethodPut, bucketName, objectKey, expires, nil, headers)
 	if err != nil {
 		return "", "", fmt.Errorf("生成预签名URL失败: %w", err)
 	}

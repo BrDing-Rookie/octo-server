@@ -1419,6 +1419,26 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 	}
 	filename = filepath.Base(filename)
 
+	// fileSize is REQUIRED so the storage layer can sign Content-Length and
+	// reject any PUT that exceeds the byte budget — same P0 size-bypass
+	// guard the public file API enforces (see modules/file/api.go).
+	fileSizeRaw := strings.TrimSpace(c.Query("fileSize"))
+	if fileSizeRaw == "" {
+		c.ResponseError(errors.New("fileSize 参数必填，且不能超过最大限制"))
+		return
+	}
+	fileSize, parseErr := strconv.ParseInt(fileSizeRaw, 10, 64)
+	if parseErr != nil || fileSize <= 0 {
+		c.ResponseError(errors.New("fileSize 参数必须为正整数（字节）"))
+		return
+	}
+	if fileSize > file.MaxFileSize {
+		rb.Warn("预签名上传 fileSize 超出限制",
+			zap.Int64("size", fileSize), zap.Int64("max", file.MaxFileSize))
+		c.ResponseError(fmt.Errorf("文件大小不能超过%dMB", file.MaxFileSize/1024/1024))
+		return
+	}
+
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" || file.IsBlockedExtension(ext) || !file.IsAllowedExtension(ext) {
 		c.ResponseError(errors.New("不支持的文件类型"))
@@ -1434,7 +1454,7 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 
 	contentDisposition := file.BuildContentDisposition(filename)
 	expiry := 30 * time.Minute
-	uploadURL, downloadURL, err := rb.fileService.PresignedPutURL(objectPath, contentType, contentDisposition, expiry)
+	uploadURL, downloadURL, err := rb.fileService.PresignedPutURL(objectPath, contentType, contentDisposition, fileSize, expiry)
 	if err != nil {
 		rb.Error("生成预签名上传URL失败", zap.Error(err))
 		c.ResponseError(errors.New("生成上传URL失败"))
@@ -1449,6 +1469,7 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 		"key":         objectPath,
 		"expiresIn":   int(expiry.Seconds()),
 		"expiredTime": time.Now().Add(expiry).Unix(),
+		"maxFileSize": fileSize,
 	})
 }
 

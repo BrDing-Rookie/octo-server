@@ -375,22 +375,41 @@ func (f *File) getFile(c *wkhttp.Context) {
 //
 // SigV4 / OSS signed-header contract — REQUIRED for the client:
 //
-// The returned `contentType` and (when present) `contentDisposition` are
+// The returned `contentType`, `contentDisposition` (when present), and
+// `Content-Length` (mirroring the request `fileSize` parameter) are
 // included in the signed headers of the presigned PUT URL (see
-// service_minio.go `PresignedPutURL` and service_oss.go `PresignedPutURL`).
-// The browser / client MUST echo them verbatim as PUT request headers:
+// service_minio.go `PresignedPutURL`, service_cos.go `PresignedPutURL`,
+// and service_oss.go `PresignedPutURL`). The browser / client MUST echo
+// each verbatim as PUT request headers:
 //
 //	PUT <uploadUrl>
 //	Content-Type: <contentType from response>
+//	Content-Length: <fileSize from request, in bytes>
 //	Content-Disposition: <contentDisposition from response, when set>
-//	<file bytes>
+//	<exactly fileSize bytes>
 //
-// Any deviation — omission, different value, alternate casing of the
-// value — produces `403 SignatureDoesNotMatch` (S3) or the OSS
-// equivalent at upload time, because those exact bytes are covered by
-// the canonical-headers section of the signature. This is enforced at
-// the storage layer; no amount of server-side retry can rescue a client
-// that does not echo them.
+// Per-header behaviour by backend (the deviation matrix that operators
+// hit in production):
+//
+//   - Content-Type: signed by every backend that supports presigned PUT
+//     (MinIO, COS, OSS). Any deviation produces 403 SignatureDoesNotMatch
+//     at the gateway.
+//   - Content-Length: signed by every backend (MinIO/COS via SigV4
+//     `signedHeaders`, OSS via the `oss.ContentLength` SignURL option).
+//     Any deviation — wrong value, missing header — produces 403
+//     SignatureDoesNotMatch (S3/COS) or InvalidArgument (OSS). This is
+//     the server-side enforcement of `MaxFileSize` for the presigned
+//     path: a client cannot upload more bytes than the server signed for.
+//   - Content-Disposition (MinIO + COS, S3 SigV4): signed across the
+//     canonical-headers section. Any deviation, including alternate
+//     casing or omission, produces 403 SignatureDoesNotMatch.
+//   - Content-Disposition (OSS V1 signing): the OSS V1 canonical-string
+//     algorithm does NOT include Content-Disposition, so a deviation here
+//     does NOT produce a signature failure. The gateway records whatever
+//     value the browser actually sent (or none, if omitted) as the
+//     object's stored disposition. Operators who need strict disposition
+//     enforcement on OSS should migrate to a SigV4-capable backend
+//     (MinIO/COS) or run a post-upload validator.
 //
 // Response shape:
 //   - method:             always "PUT"
@@ -398,15 +417,41 @@ func (f *File) getFile(c *wkhttp.Context) {
 //   - downloadUrl:        anonymous GET URL for the resulting object
 //   - contentType:        REQUIRED echo as PUT `Content-Type` header
 //   - contentDisposition: REQUIRED echo as PUT `Content-Disposition`
-//                         header when present (omitted when empty)
+//                         header when present (omitted when empty;
+//                         advisory-only on OSS V1 — see matrix above)
 //   - key:                final S3/OSS object key
 //   - expiresIn:          PUT URL validity in seconds
 //   - expiredTime:        absolute expiry, unix seconds
+//   - maxFileSize:        signed byte budget — the PUT must carry exactly
+//                         `fileSize` bytes (echoed back so the client
+//                         does not have to track it independently)
 func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	fileType := c.Query("type")
 	uploadPath := c.Query("path")
 	filename := c.Query("filename")
 	contentType := c.Query("contentType")
+	fileSizeRaw := strings.TrimSpace(c.Query("fileSize"))
+
+	// fileSize is REQUIRED — without it the presigned PUT would have no
+	// signed Content-Length and the client could upload arbitrary bytes
+	// (the very security gap the multipart uploadFile handler closes via
+	// `MaxFileSize`). Reject the request rather than silently producing a
+	// URL the storage gateway cannot bound.
+	if fileSizeRaw == "" {
+		c.ResponseError(errors.New("fileSize 参数必填，且不能超过最大限制"))
+		return
+	}
+	fileSize, parseErr := strconv.ParseInt(fileSizeRaw, 10, 64)
+	if parseErr != nil || fileSize <= 0 {
+		c.ResponseError(errors.New("fileSize 参数必须为正整数（字节）"))
+		return
+	}
+	if fileSize > MaxFileSize {
+		f.Warn("预签名上传 fileSize 超出限制",
+			zap.Int64("size", fileSize), zap.Int64("max", MaxFileSize))
+		c.ResponseError(fmt.Errorf("文件大小不能超过%dMB", MaxFileSize/1024/1024))
+		return
+	}
 
 	// 当 filename 提供时，允许 path 为空
 	pathForCheck := uploadPath
@@ -470,7 +515,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	contentDisposition := BuildContentDisposition(filename)
 
 	expiry := 30 * time.Minute
-	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, contentDisposition, expiry)
+	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, contentDisposition, fileSize, expiry)
 	if err != nil {
 		f.Error("生成预签名URL失败", zap.Error(err))
 		c.ResponseError(errors.New("生成预签名上传 URL 失败"))
@@ -485,6 +530,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		"key":         objectKey,
 		"expiresIn":   int(expiry.Seconds()),
 		"expiredTime": time.Now().Add(expiry).Unix(),
+		"maxFileSize": fileSize,
 	}
 	if contentDisposition != "" {
 		resp["contentDisposition"] = contentDisposition

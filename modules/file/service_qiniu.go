@@ -104,7 +104,7 @@ func (s *ServiceQiniu) DownloadURL(path string, filename string) (string, error)
 // upload to Qiniu should instead use the standard server-side UploadFile
 // path or migrate to the COS / OSS / MinIO backends. The
 // `configs/octo-server.yaml` support matrix documents this fallback.
-func (s *ServiceQiniu) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (string, string, error) {
+func (s *ServiceQiniu) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (string, string, error) {
 	return "", "", fmt.Errorf("七牛云后端暂不支持预签名上传：Qiniu uses an UploadToken+form-post upload model that does not map to a single PUT URL; falling back to server-side upload via UploadFile")
 }
 

@@ -55,7 +55,7 @@ func (m *mockFileServiceForUpload) PresignedGetURL(objectPath string, filename s
 	return "https://example.com/download/" + objectPath, nil
 }
 
-func (m *mockFileServiceForUpload) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (string, string, error) {
+func (m *mockFileServiceForUpload) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (string, string, error) {
 	m.lastObjectPath = objectPath
 	m.lastContentDisp = contentDisposition
 	m.lastContentType = contentType
@@ -102,7 +102,7 @@ func TestBotUploadPresigned_FilenameSanitization(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/bot/upload/presigned?filename="+tt.filename, nil)
+			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/bot/upload/presigned?fileSize=1024&filename="+tt.filename, nil)
 
 			wkCtx := &wkhttp.Context{Context: c}
 			bf.botUploadPresigned(wkCtx)
@@ -151,7 +151,7 @@ func TestBotUploadPresigned_ContentDisposition(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/bot/upload/presigned?filename="+tt.filename, nil)
+			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/bot/upload/presigned?fileSize=1024&filename="+tt.filename, nil)
 
 			wkCtx := &wkhttp.Context{Context: c}
 			bf.botUploadPresigned(wkCtx)

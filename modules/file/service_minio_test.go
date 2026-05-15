@@ -54,7 +54,7 @@ func TestPresignedURLs_RejectMalformedObjectKeys(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run("PUT/"+tc.name, func(t *testing.T) {
-			_, _, err := svc.PresignedPutURL(tc.input, "image/jpeg", "", time.Minute)
+			_, _, err := svc.PresignedPutURL(tc.input, "image/jpeg", "", 1024, time.Minute)
 			require.Error(t, err, "PresignedPutURL must reject %q", tc.input)
 		})
 		t.Run("GET/"+tc.name, func(t *testing.T) {

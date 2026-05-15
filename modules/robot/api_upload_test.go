@@ -49,7 +49,7 @@ func (m *mockFileServiceForUpload) DownloadImage(url string, ctx context.Context
 	return nil, nil
 }
 
-func (m *mockFileServiceForUpload) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (string, string, error) {
+func (m *mockFileServiceForUpload) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (string, string, error) {
 	m.lastObjectPath = objectPath
 	m.lastContentDisp = contentDisposition
 	m.lastContentType = contentType
@@ -82,7 +82,7 @@ func TestBotUploadPresigned_ContentDisposition(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/robot/upload/presigned?filename="+tt.filename, nil)
+			c.Request, _ = http.NewRequest(http.MethodGet, "/v1/robot/upload/presigned?fileSize=1024&filename="+tt.filename, nil)
 
 			wkCtx := &wkhttp.Context{Context: c}
 			rb.botUploadPresigned(wkCtx)
@@ -120,7 +120,7 @@ func TestBotUploadPresigned_UUIDBasedKey(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request, _ = http.NewRequest(http.MethodGet, "/v1/robot/upload/presigned?filename=test.jpg", nil)
+	c.Request, _ = http.NewRequest(http.MethodGet, "/v1/robot/upload/presigned?filename=test.jpg&fileSize=1024", nil)
 
 	wkCtx := &wkhttp.Context{Context: c}
 	rb.botUploadPresigned(wkCtx)

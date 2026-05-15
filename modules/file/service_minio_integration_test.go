@@ -76,7 +76,7 @@ func TestPresignedURLs_SignAgainstPublicEndpoint(t *testing.T) {
 
 	t.Run("PUT URL signed against public host (no rewriting)", func(t *testing.T) {
 		uploadURL, downloadURL, err := svc.PresignedPutURL(
-			"chat/2026/05/abc.jpg", "image/jpeg", "", 5*time.Minute,
+			"chat/2026/05/abc.jpg", "image/jpeg", "", 12345, 5*time.Minute,
 		)
 		require.NoError(t, err)
 		require.NotEmpty(t, uploadURL)
@@ -99,17 +99,21 @@ func TestPresignedURLs_SignAgainstPublicEndpoint(t *testing.T) {
 		assert.NotContains(t, u.Host, "127.0.0.1",
 			"server-internal hostname must not leak into the signed PUT URL")
 
-		// Signature shape: SigV4 query params and `host` in the signed
-		// headers. Because the signing client was constructed against
-		// DownloadURL, the `host` covered by the signature *is* the
+		// Signature shape: SigV4 query params and `host` + `content-length`
+		// in the signed headers. Because the signing client was constructed
+		// against DownloadURL, the `host` covered by the signature *is* the
 		// URL's own host. Any post-sign host change would break that
-		// invariant, which is the whole bug R2 is fixing.
+		// invariant. `content-length` is the P0 size-bypass guard landed in
+		// R6: with it in signed headers, the storage gateway rejects any
+		// PUT whose body length disagrees with the signed value.
 		q := u.Query()
 		assert.NotEmpty(t, q.Get("X-Amz-Signature"),
 			"presigned PUT URL must carry a SigV4 signature")
 		signedHeaders := q.Get("X-Amz-SignedHeaders")
 		assert.Contains(t, signedHeaders, "host",
 			"presigned PUT URL must include `host` in its signed headers (got %q)", signedHeaders)
+		assert.Contains(t, signedHeaders, "content-length",
+			"presigned PUT URL must include `content-length` in its signed headers so the storage layer can enforce the upload size cap (got %q)", signedHeaders)
 	})
 
 	t.Run("GET URL signed against public host (no rewriting)", func(t *testing.T) {
@@ -215,7 +219,7 @@ func TestPresignedURLs_RejectPathPrefixedDownloadURL(t *testing.T) {
 
 			svc := file.NewServiceMinio(testutil.NewTestContext(cfg))
 
-			_, _, putErr := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", time.Minute)
+			_, _, putErr := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", 1024, time.Minute)
 			require.Error(t, putErr,
 				"PresignedPutURL must reject path-prefixed downloadURL %q", tc.downloadURL)
 			assert.Contains(t, putErr.Error(), "minio.downloadURL",
@@ -247,7 +251,7 @@ func TestPresignedURLs_RejectPathPrefixedDownloadURL(t *testing.T) {
 		cfg.Minio.SecretAccessKey = "test-secret-access-key-1234567890"
 
 		svc := file.NewServiceMinio(testutil.NewTestContext(cfg))
-		_, _, err := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", time.Minute)
+		_, _, err := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", 1024, time.Minute)
 		require.NoError(t, err,
 			"trailing-slash-only downloadURL must be accepted as host:port-equivalent")
 	})
@@ -313,7 +317,7 @@ func TestPresignedPutURL_ConcurrentBucketBootstrap(t *testing.T) {
 	for i := 0; i < parallelism; i++ {
 		go func() {
 			<-start
-			_, _, err := svc.PresignedPutURL("chat/concurrent.jpg", "image/jpeg", "", time.Minute)
+			_, _, err := svc.PresignedPutURL("chat/concurrent.jpg", "image/jpeg", "", 1024, time.Minute)
 			errCh <- err
 		}()
 	}

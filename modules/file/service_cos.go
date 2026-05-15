@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,7 +128,16 @@ func (sc *ServiceCOS) GetFile(ph string) (io.ReadCloser, string, error) {
 
 // PresignedPutURL 生成预签名 PUT URL，用于客户端直传 COS。
 // 上传和下载都使用 BucketURL 配置的域名，配置源站域名即可支持 PUT。
-func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+//
+// fileSize is signed into the canonical-headers section as
+// `Content-Length`. The browser MUST echo the same value (browsers compute
+// it automatically from the request body length); any mismatch is
+// rejected by COS as 403 SignatureDoesNotMatch — same enforcement model
+// as the MinIO backend, see service_minio.go for the rationale.
+func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+	if fileSize <= 0 {
+		return "", "", fmt.Errorf("预签名上传必须提供正向的 fileSize（字节数），用于在签名中固定 Content-Length")
+	}
 	cosConfig := sc.ctx.GetConfig().COS
 	client, err := sc.getClient()
 	if err != nil {
@@ -139,14 +149,15 @@ func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, con
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var presigned *url.URL
-	if contentDisposition != "" {
-		headers := http.Header{}
-		headers.Set("Content-Disposition", contentDisposition)
-		presigned, err = client.PresignHeader(ctx, http.MethodPut, cosConfig.Bucket, key, expires, nil, headers)
-	} else {
-		presigned, err = client.PresignedPutObject(ctx, cosConfig.Bucket, key, expires)
+	headers := http.Header{}
+	headers.Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	if contentType != "" {
+		headers.Set("Content-Type", contentType)
 	}
+	if contentDisposition != "" {
+		headers.Set("Content-Disposition", contentDisposition)
+	}
+	presigned, err := client.PresignHeader(ctx, http.MethodPut, cosConfig.Bucket, key, expires, nil, headers)
 	if err != nil {
 		return "", "", fmt.Errorf("生成预签名URL失败: %w", err)
 	}

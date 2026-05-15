@@ -61,7 +61,7 @@ func (s *SeaweedFS) DownloadURL(path string, filename string) (string, error) {
 // should sit a presign-capable proxy (or the SeaweedFS S3 gateway, when
 // configured) in front of SeaweedFS, or fall back to server-side upload
 // via UploadFile.
-func (s *SeaweedFS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (string, string, error) {
+func (s *SeaweedFS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (string, string, error) {
 	return "", "", fmt.Errorf("SeaweedFS 后端暂不支持预签名上传：SeaweedFS does not expose a presigned PUT primitive; falling back to server-side upload via UploadFile")
 }
 
