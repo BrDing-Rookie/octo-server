@@ -191,13 +191,13 @@ func TestInferContentType(t *testing.T) {
 
 // mockService implements IService for testing
 type mockService struct {
-	composeResult        map[string]interface{}
-	composeErr           error
-	lastObjectPath       string
-	lastContentDisp      string
-	lastFileSize         int64
-	presignedGetErr      error
-	lastGetDisposition   string
+	composeResult      map[string]interface{}
+	composeErr         error
+	lastObjectPath     string
+	lastContentDisp    string
+	lastFileSize       int64
+	presignedGetErr    error
+	lastGetDisposition string
 }
 
 func (m *mockService) DownloadAndMakeCompose(uploadPath string, downloadURLs []string) (map[string]interface{}, error) {
@@ -424,9 +424,9 @@ func TestGetUploadCredentials_UUIDBasedKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name    string
+		name     string
 		filename string
-		wantExt string
+		wantExt  string
 	}{
 		{"chinese filename", "带中文的文件.pdf", ".pdf"},
 		{"japanese filename", "テスト.png", ".png"},

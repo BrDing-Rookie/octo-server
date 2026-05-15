@@ -20,10 +20,10 @@ import (
 )
 
 type mockFileServiceForUpload struct {
-	lastObjectPath       string
-	lastContentDisp      string
-	lastContentType      string
-	lastUploadPath       string
+	lastObjectPath        string
+	lastContentDisp       string
+	lastContentType       string
+	lastUploadPath        string
 	lastUploadContentDisp string
 	lastUploadContentType string
 }
@@ -66,29 +66,29 @@ func TestBotUploadPresigned_FilenameSanitization(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name    string
+		name     string
 		filename string
-		wantExt string
+		wantExt  string
 	}{
 		{
-			name:    "normal filename",
+			name:     "normal filename",
 			filename: "test.jpg",
-			wantExt: ".jpg",
+			wantExt:  ".jpg",
 		},
 		{
-			name:    "path traversal attack",
+			name:     "path traversal attack",
 			filename: "../../etc/passwd.jpg",
-			wantExt: ".jpg",
+			wantExt:  ".jpg",
 		},
 		{
-			name:    "absolute path",
+			name:     "absolute path",
 			filename: "/var/log/secret.png",
-			wantExt: ".png",
+			wantExt:  ".png",
 		},
 		{
-			name:    "nested path",
+			name:     "nested path",
 			filename: "subdir/nested/file.pdf",
-			wantExt: ".pdf",
+			wantExt:  ".pdf",
 		},
 	}
 

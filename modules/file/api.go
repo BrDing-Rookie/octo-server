@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -417,14 +417,14 @@ func (f *File) getFile(c *wkhttp.Context) {
 //   - downloadUrl:        anonymous GET URL for the resulting object
 //   - contentType:        REQUIRED echo as PUT `Content-Type` header
 //   - contentDisposition: REQUIRED echo as PUT `Content-Disposition`
-//                         header when present (omitted when empty;
-//                         advisory-only on OSS V1 — see matrix above)
+//     header when present (omitted when empty;
+//     advisory-only on OSS V1 — see matrix above)
 //   - key:                final S3/OSS object key
 //   - expiresIn:          PUT URL validity in seconds
 //   - expiredTime:        absolute expiry, unix seconds
 //   - maxFileSize:        signed byte budget — the PUT must carry exactly
-//                         `fileSize` bytes (echoed back so the client
-//                         does not have to track it independently)
+//     `fileSize` bytes (echoed back so the client
+//     does not have to track it independently)
 func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	fileType := c.Query("type")
 	uploadPath := c.Query("path")
@@ -503,7 +503,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		}
 		objectKey = fileType + sanitized
 	} else if filename != "" {
-			// Use UUID-based key (pure ASCII) to avoid double-encoding by HTTP clients.
+		// Use UUID-based key (pure ASCII) to avoid double-encoding by HTTP clients.
 		// The original filename is preserved in Content-Disposition header.
 		fnExt := filepath.Ext(filename)
 		objectKey = fmt.Sprintf("%s/%d/%s/%s%s", fileType, time.Now().Unix(), util.GenerUUID(), util.GenerUUID(), fnExt)

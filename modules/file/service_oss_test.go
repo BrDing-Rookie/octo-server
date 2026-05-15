@@ -5,9 +5,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
+	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/stretchr/testify/assert"
 )
 

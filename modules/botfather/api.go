@@ -16,20 +16,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
-	"github.com/Mininglamp-OSS/octo-server/pkg/botutil"
 	"github.com/Mininglamp-OSS/octo-server/modules/voice"
-	"github.com/Mininglamp-OSS/octo-lib/common"
-	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/pkg/botutil"
 	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
 	"github.com/gocraft/dbr/v2"
@@ -739,9 +739,9 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 	// 连续 3 个窗口未发消息则永久静默，直到 bot 发消息重置
 	typingStartKey := fmt.Sprintf("typing_start:%s:%s:%d", robotID, channelID, req.ChannelType)
 	typingCountKey := fmt.Sprintf("typing_count:%s:%s:%d", robotID, channelID, req.ChannelType)
-	const typingMaxDuration = 90  // 单窗口最大秒数
-	const typingMaxWindows = 3    // 最大连续窗口数
-	const typingKeyTTL = 180      // key 自动清理 TTL（秒）
+	const typingMaxDuration = 90 // 单窗口最大秒数
+	const typingMaxWindows = 3   // 最大连续窗口数
+	const typingKeyTTL = 180     // key 自动清理 TTL（秒）
 
 	startStr, _ := bf.ctx.GetRedisConn().GetString(typingStartKey)
 	now := time.Now().Unix()

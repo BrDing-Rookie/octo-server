@@ -3,8 +3,8 @@ package file
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
