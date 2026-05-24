@@ -460,6 +460,64 @@ func (sb *Sidebar) Sync(c *wkhttp.Context) {
 			return
 		}
 		items = mergeThreadEntries(items, threadExtRows, lastMsgAtMap, categorySetting, unfollowedGroups, groupSpaceMap, externalGroupMap, defaultSpaceID)
+
+		// Issue #151 symptom #2 — materialize ext rows for default-followed
+		// groups (categorized but never touched).  Without this, OnThreadCreated
+		// silently skips this user for those groups and new threads never reach
+		// the follow tab.  Fail-open: a failure here must not block the sidebar
+		// response.  Subsequent sidebar/sync calls will retry the same
+		// materialization until it lands.
+		//
+		// Latency budget: the loop is O(N) over the follow-tab items but only
+		// emits a DB write when defaultFollowedGroups is non-empty.  First-load
+		// for a user with many categorized groups pays one batched INSERT IGNORE
+		// (a single tx); every subsequent sidebar/sync from the same user hits
+		// the (groupExts has-key) branch and exits without a write.  Cost
+		// amortizes to one DB write per never-touched group across the user's
+		// lifetime.
+		var defaultFollowedGroups []string
+		for _, it := range items {
+			if it.TargetType != int(common.ChannelTypeGroup) {
+				continue
+			}
+			if _, hasExt := groupExts[it.TargetID]; hasExt {
+				continue
+			}
+			defaultFollowedGroups = append(defaultFollowedGroups, it.TargetID)
+		}
+		if len(defaultFollowedGroups) > 0 {
+			// Why no DefaultFollowedGroupGuard here (vs the /v1/follow/sort path):
+			// the candidates are not client-supplied.  They come from
+			// buildFollowItems above, which only emits a group SidebarItem when
+			// the group is in `categorySetting` with a non-nil CategoryID, and
+			// that CategoryID carries "live" semantics — see
+			// db_group_category.go GroupCategorySetting.CategoryID for the full
+			// contract.  Two stacked filters guarantee Stage-1-equivalent
+			// authorization without a separate round-trip:
+			//   1. Membership / Space visibility: candidate group_no's came
+			//      from the IM-returned conversation list (FilterRawConversations-
+			//      BySpace), which only includes channels the user is a member
+			//      of in the current Space.  Same authority the rest of the
+			//      sidebar relies on.
+			//   2. Live-category: QueryCategorySettingsByGroupNos SELECTs
+			//      gc.category_id (not gs.category_id), so a group_setting
+			//      pointing at a soft-deleted category (gc.status=2) or a
+			//      missing category row yields CategoryID=nil; buildFollowItems
+			//      then drops it before this loop runs.  Issue #151 review fix:
+			//      the previous code selected gs.category_id, letting dangling
+			//      refs through; that bypass is closed at the query layer.
+			// Together these are at least as strong as the UpdateSort guard's
+			// Stage 1 INNER JOIN.  Stage 2 (membership / Disband) is also
+			// covered by point 1 above — IMSyncUserConversation does not
+			// return rows for users who aren't current members, and Disband
+			// groups are filtered out of the IM result by the IM core.
+			// Adding a guard call here would be redundant and would cost a
+			// per-group channel-access round-trip on the hot read path.
+			if mErr := sb.convExtDB.MaterializeDefaultFollowedGroups(loginUID, spaceID, defaultFollowedGroups); mErr != nil {
+				sb.Warn("sidebar sync: default-followed group materialization failed (non-fatal)",
+					zap.Error(mErr), zap.Int("count", len(defaultFollowedGroups)))
+			}
+		}
 	case "recent":
 		items = buildRecentItems(conversations, pinnedSet, groupSpaceMap, externalGroupMap, defaultSpaceID)
 	}
