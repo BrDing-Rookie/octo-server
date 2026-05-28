@@ -1,6 +1,7 @@
 package voice_adapter
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -39,6 +40,7 @@ func (a *VoiceAdapter) Route(r *wkhttp.WKHttp) {
 		auth.PUT("/local-config", a.putLocalConfig)
 		auth.GET("/local-config", a.getLocalConfig)
 		auth.DELETE("/local-config", a.deleteLocalConfig)
+		auth.POST("/local-config/reset", a.resetLocalConfig)
 	}
 }
 
@@ -265,6 +267,60 @@ func (a *VoiceAdapter) getLocalConfig(c *wkhttp.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+func (a *VoiceAdapter) resetLocalConfig(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64*1024)
+
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": http.StatusRequestEntityTooLarge, "msg": "request body too large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"status": http.StatusBadRequest, "msg": "invalid request body"})
+		return
+	}
+
+	spaceID := getSpaceID(c)
+	if spaceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": http.StatusBadRequest, "msg": "X-Space-ID header is required"})
+		return
+	}
+
+	if req.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": http.StatusBadRequest, "msg": "enabled is required"})
+		return
+	}
+
+	isMember, err := space.CheckMembership(a.ctx.DB(), spaceID, loginUID)
+	if err != nil {
+		a.Error("check space membership failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"status": http.StatusInternalServerError, "msg": "check space membership failed"})
+		return
+	}
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"status": http.StatusForbidden, "msg": "not a member of this space"})
+		return
+	}
+
+	err = a.client.ResetLocalConfig(c.Request.Context(), loginUID, "space", spaceID, *req.Enabled)
+	if err != nil {
+		var svcErr *SpeechServiceError
+		if errors.As(err, &svcErr) && svcErr.StatusCode >= 400 && svcErr.StatusCode < 500 {
+			c.JSON(svcErr.StatusCode, gin.H{"status": svcErr.StatusCode, "msg": svcErr.Body})
+			return
+		}
+		a.Error("reset local config failed", zap.Error(err))
+		c.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway, "msg": "speech service unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": http.StatusOK, "msg": "ok"})
+}
+
 func (a *VoiceAdapter) deleteLocalConfig(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
@@ -288,9 +344,20 @@ func (a *VoiceAdapter) deleteLocalConfig(c *wkhttp.Context) {
 	err = a.client.DeleteLocalConfig(c.Request.Context(), loginUID, "space", spaceID)
 	if err != nil {
 		var svcErr *SpeechServiceError
-		if errors.As(err, &svcErr) && svcErr.StatusCode >= 400 && svcErr.StatusCode < 500 {
-			c.JSON(svcErr.StatusCode, gin.H{"status": svcErr.StatusCode, "msg": svcErr.Body})
-			return
+		if errors.As(err, &svcErr) {
+			if svcErr.StatusCode == 404 {
+				var parsed struct {
+					Status int `json:"status"`
+				}
+				if json.Unmarshal([]byte(svcErr.Body), &parsed) == nil && parsed.Status == 404 {
+					c.JSON(http.StatusOK, gin.H{"status": http.StatusOK, "msg": "ok"})
+					return
+				}
+			}
+			if svcErr.StatusCode >= 400 && svcErr.StatusCode < 500 {
+				c.JSON(svcErr.StatusCode, gin.H{"status": svcErr.StatusCode, "msg": svcErr.Body})
+				return
+			}
 		}
 		a.Error("delete local config failed", zap.Error(err))
 		c.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway, "msg": "speech service unavailable"})
