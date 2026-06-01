@@ -80,10 +80,13 @@ type OIDC struct {
 	audit      auditWriter
 	killer     sessionKiller
 	revoker    rtRevoker
-	worker     *SyncWorker
-	tickLock   *RedisTickLock
-	cbGuard    *CallbackGuard
-	bind       *BindService // 自助绑定(P0);Bind.Enabled=false 时为 nil,handler 不挂载
+	// idTokens 缓存登录时验签过的 id_token,供 logout 当 RP-Initiated Logout 的
+	// id_token_hint。nil 时 logout 不生成 end_session_url(降级为仅清本地)。
+	idTokens idTokenStore
+	worker   *SyncWorker
+	tickLock *RedisTickLock
+	cbGuard  *CallbackGuard
+	bind     *BindService // 自助绑定(P0);Bind.Enabled=false 时为 nil,handler 不挂载
 	// bindStore 单独持引用便于 Close 时关连接池。bind.store 是 BindStore 接口,
 	// 接口本身没 Close,production impl(*redisBindStore)有独立 redis.Client,
 	// 不关会泄漏。
@@ -156,6 +159,26 @@ func New(ctx *config.Context) *OIDC {
 		return o
 	}
 	o.client = client
+	// id_token 缓存(RP-Initiated Logout)仅在功能"确实可用"时启用:既配了回跳地址
+	// (PostLogoutRedirectURI),又拿得到*合法 https* 的 end_session 端点(discovery 或
+	// override)。端点仅"非空"不够 —— 非法/非 https 端点下 logout 也出不了 URL
+	// (buildEndSessionURL 会拒),此时建池存 PII id_token 纯属浪费。放在 client 之后才能判
+	// 端点可用性。密钥已在 LoadConfig 校验为 32B,构造失败仅记日志降级,不影响登录主流程。
+	if cfg.Provider.PostLogoutRedirectURI != "" {
+		endpoint := o.endSessionEndpoint()
+		switch {
+		case endpoint == "" || validateLogoutURL("end_session_endpoint", endpoint) != nil:
+			// 配了回跳地址却拿不到可用端点:打 Info 让运维可见"为什么 RP-logout 没生效"。
+			o.Info("RP-Initiated Logout 已禁用:end_session 端点不可用(discovery 未提供且未配 override,或非 https)",
+				zap.String("endpoint", endpoint))
+		default:
+			if enc, eerr := NewEncryptor(cfg.Provider.RefreshTokenEncryptionKey); eerr != nil {
+				o.Error("构造 id_token Encryptor 失败,RP-Initiated Logout 禁用", zap.Error(eerr))
+			} else {
+				o.idTokens = newRedisIDTokenStore(ctx, enc)
+			}
+		}
+	}
 	return o
 }
 
@@ -565,6 +588,8 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 			jti, ierr := o.bind.IssueWithReason(c.Request.Context(), claims, sd, reason)
 			if ierr == nil {
 				result = "bind_pending" // 已在 callbackResultLabels 注册
+				// bind 接管时尚不知 uid,先按 jti 暂存 id_token,confirm/create 后迁移到 uid。
+				o.saveBindIDTokenHint(c.Request.Context(), jti, rawID)
 				o.writeAudit("bind:"+subHash(jti), EventBindIssued, sd, "")
 				o.redirectToBindPage(c, sd, jti)
 				return
@@ -745,6 +770,14 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 	result = "ok"
 	// 成功路径清场:防止 IP 长尾累积导致历史失败 + 偶发 state 过期把用户误锁。
 	o.cbGuard.ResetLogged(clientIP)
+	// 缓存验签过的 id_token,供后续 logout 当 RP-Initiated Logout 的 id_token_hint。
+	// best-effort:存失败只告警,不影响登录(logout 时退回"仅清本地")。日志不打 token。
+	if o.idTokens != nil && sessResp.UID != "" {
+		if serr := o.idTokens.Save(c.Request.Context(), sessResp.UID, rawID, o.cfg.Provider.IDTokenTTL); serr != nil {
+			o.Warn("OIDC callback 缓存 id_token 失败(不影响登录,仅 RP-logout 降级)",
+				zap.String("trace_id", traceID), zap.Error(serr))
+		}
+	}
 	o.writeAudit(sessResp.UID, EventCallbackOK, sd, "")
 	o.redirectAfterCallback(c, sd, false)
 }
@@ -773,6 +806,15 @@ func (o *OIDC) Close() error {
 		}
 		o.bindStore = nil
 	}
+	// idTokens 独立 redis.Client(RP-Initiated Logout),New() 在 enabled 时创建。
+	// 与 bindStore 同样需在关闭路径释放,否则连接池 fd 泄漏。放在 stateStore nil
+	// 早返回之前,保证 stateStore 已被置 nil 的二次 Close 仍能关掉 idTokens。
+	if ridt, ok := o.idTokens.(*redisIDTokenStore); ok {
+		if err := ridt.Close(); err != nil {
+			o.Error("关闭 OIDC id_token store 失败", zap.Error(err))
+		}
+		o.idTokens = nil
+	}
 	if o.stateStore == nil {
 		return nil
 	}
@@ -789,8 +831,19 @@ func (o *OIDC) Close() error {
 // 理由:logout 客户端关心的是"我点了登出,本地已清空状态",对幂等性要求高于完美吊销。
 // 真正的兜底由 SyncWorker 的下次轮询补足(refresh 失败也会触发踢线)。
 //
-// IdP 端 RP-Initiated Logout(/end_session)由前端按需调用,后端不代理:
-// id_token_hint 在前端容易拿到,且跨域跳转更适合浏览器层面发起。
+// IdP 端 RP-Initiated Logout(/end_session)的跳转地址由后端拼好后随 200 响应返回
+// (end_session_url 字段),前端做顶层跳转。后端收口的原因:本架构 code→token 在
+// 服务端完成,前端无法自行*构造* id_token_hint(它不经手 token 交换),也不应散落
+// end_session 端点 / 参数 / 回跳白名单这些 IdP 细节 —— 由后端给出单次性 URL 最稳妥。
+// 真正终止 IdP 会话仍依赖浏览器顶层跳转携带 IdP 域 cookie,所以后端只给 URL,不代理跳转。
+//
+// 信任模型说明:end_session_url 里必然带 id_token_hint(RFC 规定的 front-channel 参数),
+// 因此该 id_token 会暴露到前端 JS、浏览器历史、Referer 及 IdP 访问日志 —— 这是
+// RP-Initiated Logout 协议固有的。可接受:它是单次性、不可重放的登出提示(octo-server
+// 自身从不把它当 bearer/assertion 复用),取出即原子作废(luaGetDel)。
+//
+// 配置缺失(未配 PostLogoutRedirectURI / 无 end_session 端点 / 无缓存的 id_token)时
+// 省略 end_session_url,前端降级为仅清本地 —— 纯增量,不影响存量行为。
 func (o *OIDC) logout(c *wkhttp.Context) {
 	uid := c.GetLoginUID()
 	if uid == "" {
@@ -838,7 +891,110 @@ func (o *OIDC) logout(c *wkhttp.Context) {
 		IP:        util.GetClientPublicIP(c.Request),
 		UserAgent: c.Request.UserAgent(),
 	}, "")
-	c.JSON(http.StatusOK, map[string]interface{}{"status": 200})
+
+	resp := map[string]interface{}{"status": 200}
+	// 拼 IdP end_session 跳转地址(RP-Initiated Logout)。任一前置缺失时返回空串,
+	// 此时省略字段,前端降级为仅清本地。end_session_url 含 id_token,不写日志。
+	if endSessionURL := o.buildEndSessionURL(ctx, uid); endSessionURL != "" {
+		resp["end_session_url"] = endSessionURL
+		// 响应体含 id_token_hint,禁止任何缓存(OAuth/OIDC 安全 BCP、RFC 6749 §5.1)。
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// endSessionEndpoint 解析 IdP 的 RP-Initiated Logout 端点:config override 优先,
+// 否则取 Discovery 解析值。两者皆空时返回空串(IdP 未声明且未配 override)。
+func (o *OIDC) endSessionEndpoint() string {
+	if o.cfg != nil && o.cfg.Provider.EndSessionURL != "" {
+		return o.cfg.Provider.EndSessionURL
+	}
+	if o.client != nil {
+		return o.client.EndSessionEndpoint()
+	}
+	return ""
+}
+
+// buildEndSessionURL 构造 RP-Initiated Logout 跳转地址,带 id_token_hint +
+// post_logout_redirect_uri。任一前置不满足返回空串(调用方据此省略字段、前端降级):
+//   - 未配置 PostLogoutRedirectURI(运维写死的回跳页,同时充当白名单);
+//   - idTokens 未注入 / 取不到该 uid 的 id_token(非 OIDC 登录 / 已过期 / 已消费);
+//   - 无可用 end_session 端点。
+//
+// 取出 id_token 即一次性消费(Take 内部删除)。不带 state(Aegis Discovery 未声明)。
+//
+// 顺序很关键:先解析+校验端点,再消费 id_token。原因有二:
+//   - 端点非法时不白烧 token(GETDEL 不可逆),logout 仍可重试拿到 end_session_url;
+//   - end_session 端点可能来自 discovery(非 config override,未经启动期校验),这里统一
+//     过一道 https 校验 —— 防 IdP 万一下发 http:// 把带 id_token 的 URL 降级到非 https。
+func (o *OIDC) buildEndSessionURL(ctx context.Context, uid string) string {
+	if o.cfg == nil || o.cfg.Provider.PostLogoutRedirectURI == "" || o.idTokens == nil {
+		return ""
+	}
+	endpoint := o.endSessionEndpoint()
+	if endpoint == "" {
+		return ""
+	}
+	// 校验 + 解析端点(在消费 token 之前)。validateLogoutURL 强制绝对 https
+	// (dev 可 OCTO_OIDC_LOGOUT_ALLOW_INSECURE=1),覆盖 discovery 与 override 两种来源。
+	if err := validateLogoutURL("end_session_endpoint", endpoint); err != nil {
+		o.Error("OIDC logout end_session 端点不合法,跳过 IdP 登出", zap.String("endpoint", endpoint), zap.Error(err))
+		return ""
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		// 只记端点本身,不记含 id_token 的完整 URL。
+		o.Error("OIDC logout 解析 end_session 端点失败", zap.String("endpoint", endpoint), zap.Error(err))
+		return ""
+	}
+	idToken, err := o.idTokens.Take(ctx, uid)
+	if err != nil {
+		// 取 id_token 失败不阻断 logout(本地已踢线+吊销),仅降级跳过 IdP 跳转。
+		o.Warn("OIDC logout 取 id_token 失败,跳过 end_session 跳转", zap.Error(err))
+		return ""
+	}
+	if idToken == "" {
+		return ""
+	}
+	q := u.Query()
+	q.Set("id_token_hint", idToken)
+	q.Set("post_logout_redirect_uri", o.cfg.Provider.PostLogoutRedirectURI)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// saveBindIDTokenHint 在自助绑定接管(callback bind_pending)时,按 bind token(jti)
+// 暂存验签过的 id_token,TTL 对齐 bind session —— bind 路径的 callback 还不知道最终
+// uid,无法直接按 uid 存。confirm/create 成功后由 promoteBindIDToken 迁移到 uid 名下。
+// 仅在 RP-Initiated Logout 启用(idTokens!=nil)时生效;best-effort,失败不阻断绑定。
+func (o *OIDC) saveBindIDTokenHint(ctx context.Context, jti, rawID string) {
+	if o.idTokens == nil || jti == "" || rawID == "" {
+		return
+	}
+	if err := o.idTokens.Save(ctx, bindIDTokenKey(jti), rawID, o.cfg.Bind.TokenTTL); err != nil {
+		o.Warn("OIDC bind 暂存 id_token 失败(不影响绑定,仅 RP-logout 降级)", zap.Error(err))
+	}
+}
+
+// promoteBindIDToken 把 bind 接管阶段按 jti 暂存的 id_token 迁移到已确定的 uid 名下,
+// 供后续 logout 当 id_token_hint。一次性消费 jti 暂存项(Take 内部删除);无值时静默
+// (非 OIDC bind 登录 / 已过期 / 功能未启用)。best-effort,失败不阻断绑定完成。
+func (o *OIDC) promoteBindIDToken(ctx context.Context, jti, uid string) {
+	if o.idTokens == nil || jti == "" || uid == "" {
+		return
+	}
+	raw, err := o.idTokens.Take(ctx, bindIDTokenKey(jti))
+	if err != nil {
+		o.Warn("OIDC bind 取暂存 id_token 失败,跳过 RP-logout 缓存", zap.Error(err))
+		return
+	}
+	if raw == "" {
+		return
+	}
+	if err := o.idTokens.Save(ctx, uid, raw, o.cfg.Provider.IDTokenTTL); err != nil {
+		o.Warn("OIDC bind 迁移 id_token 到 uid 失败", zap.Error(err))
+	}
 }
 
 func (o *OIDC) failWithAuthcode(ctx context.Context, sd *StateData, claims *IDTokenClaims, err error) {
