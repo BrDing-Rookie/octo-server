@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -774,6 +775,115 @@ func TestPush_ValidPushesNotIPLimited(t *testing.T) {
 		assert.NotEqualf(t, http.StatusTooManyRequests, w.Code,
 			"valid push %d from a fixed IP must not be failure-limited; body=%s", i, w.Body.String())
 	}
+}
+
+// TestPush_CacheServesStaleWithinTTL_HandlerInvalidates verifies the push
+// hot-path cache (#284 item 2):
+//   - a warm cache serves the webhook record, so a DB-only status change (made
+//     behind the handler's back) does NOT stop pushes within the TTL window;
+//   - a delete THROUGH the handler invalidates the cache and stops pushes at once.
+//
+// Asserts on the auth outcome (401 vs not-401) rather than 200, so it is robust
+// to whether the downstream send returns 200/502 in the test harness. All
+// limiters are set generous so a 429 can't be mistaken for the auth gate.
+func TestPush_CacheServesStaleWithinTTL_HandlerInvalidates(t *testing.T) {
+	// Long TTL so the cached entry never expires mid-test; cache TTL is read at
+	// module construction, so it must be set before setupTestEnv.
+	t.Setenv("DM_INCOMINGWEBHOOK_CACHE_TTL_MS", "60000")
+	t.Setenv("DM_INCOMINGWEBHOOK_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "1000")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.77"
+	resetIPFailBucket(t, ctx, ip)
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "cache-wh",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+
+	// 1) Warm the cache (status=enabled). Auth passes → not 401.
+	w = do(handler, anonReqIP("POST", url, body, ip))
+	assert.NotEqualf(t, http.StatusUnauthorized, w.Code, "warm push must authorize; body=%s", w.Body.String())
+
+	// 2) Disable directly in DB, bypassing the handler so the cache is NOT
+	//    invalidated. The warm cache still serves enabled → push still authorizes
+	//    (non-401) within the TTL window — proving the cache is in effect.
+	_, err := ctx.DB().UpdateBySql("UPDATE incoming_webhook SET status=0 WHERE webhook_id=?", whID).Exec()
+	assert.NoError(t, err)
+	w = do(handler, anonReqIP("POST", url, body, ip))
+	assert.NotEqualf(t, http.StatusUnauthorized, w.Code,
+		"within TTL the cached (enabled) record must still authorize despite the DB-only disable; body=%s", w.Body.String())
+
+	// 3) Delete through the handler → invalidates the cache. Next push misses the
+	//    cache, reads the soft-deleted row, and is rejected (401).
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	assert.Equalf(t, http.StatusOK, w.Code, "delete; body=%s", w.Body.String())
+	w = do(handler, anonReqIP("POST", url, body, ip))
+	assert.Equalf(t, http.StatusUnauthorized, w.Code,
+		"after handler delete invalidates the cache, push must be rejected; body=%s", w.Body.String())
+}
+
+// TestPush_GroupAdminDisable_TTLBounded pins the deliberately-accepted staleness
+// for administrative group-disable (#293 review): the module invalidates
+// groupCache only on disband, NOT on admin disable (Normal→Disabled, emitted as
+// event.GroupUpdate, which this module does not subscribe to). So after a group is
+// disabled directly, the cached Normal entry keeps the push auth gate open until
+// the TTL expires, then the gate re-reads the DB and rejects. A short TTL makes the
+// expiry observable; this is the documented trade-off, not immediate enforcement.
+func TestPush_GroupAdminDisable_TTLBounded(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_CACHE_TTL_MS", "2000") // short but generous vs slow CI
+	t.Setenv("DM_INCOMINGWEBHOOK_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "1000")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.91"
+	resetIPFailBucket(t, ctx, ip)
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "grp-wh",
+	}))
+	created := parseJSON(t, w)
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", created["webhook_id"].(string), created["token"].(string))
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+
+	// Warm the group cache (Normal) → push authorizes.
+	pw := do(handler, anonReqIP("POST", url, body, ip))
+	assert.NotEqualf(t, http.StatusUnauthorized, pw.Code, "warm push must authorize; body=%s", pw.Body.String())
+
+	// Admin-disable the group directly (Normal→Disabled, GroupStatusDisabled=0),
+	// no disband event/cascade — exactly the path this module does not invalidate.
+	_, err := ctx.DB().UpdateBySql("UPDATE `group` SET status=? WHERE group_no=?", 0, groupNo).Exec()
+	assert.NoError(t, err)
+
+	// Within the TTL: the cached Normal entry still authorizes (documented staleness).
+	pw = do(handler, anonReqIP("POST", url, body, ip))
+	assert.NotEqualf(t, http.StatusUnauthorized, pw.Code,
+		"within TTL the cached Normal group must still authorize after a DB-only disable; body=%s", pw.Body.String())
+
+	// After the TTL: the group gate re-reads the DB, sees non-Normal, rejects (401).
+	time.Sleep(2500 * time.Millisecond) // > TTL(2000ms)
+	pw = do(handler, anonReqIP("POST", url, body, ip))
+	assert.Equalf(t, http.StatusUnauthorized, pw.Code,
+		"after the TTL the admin-disabled group must reject push; body=%s", pw.Body.String())
 }
 
 // TestPush_ValidPushesCappedByPerIPRequestLimit locks the layer the reviewers
