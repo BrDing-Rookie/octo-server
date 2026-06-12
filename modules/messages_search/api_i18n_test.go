@@ -14,6 +14,7 @@ import (
 func TestMessagesSearchNoLegacyResponseError(t *testing.T) {
 	files := []string{
 		"api.go",
+		"authz.go",
 		"search_messages.go",
 		"search_media.go",
 		"search_files.go",

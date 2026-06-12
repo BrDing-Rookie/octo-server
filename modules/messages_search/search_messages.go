@@ -48,6 +48,9 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 	if !ok {
 		return
 	}
+	if !h.checkChannelAccess(c, req.ChannelType, req.ChannelID, loginUID) {
+		return
+	}
 
 	client, err := ESClient(h.cfg)
 	if err != nil {
