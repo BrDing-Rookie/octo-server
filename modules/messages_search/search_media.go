@@ -164,6 +164,10 @@ func (h *Handler) singleMediaHit(doc Doc, req SearchMediaReq) MediaHit {
 	case payloadTypeImage:
 		if img := imagePayloadOf(doc.Payload); img != nil {
 			mh.MediaKind = "image"
+			// v1.8 mapping has no separate thumb URL field; surface the
+			// original image URL so callers always get a renderable URL
+			// and may apply CDN sizing parameters client-side.
+			mh.ThumbURL = img.URL
 			mh.Width = img.Width
 			mh.Height = img.Height
 		}

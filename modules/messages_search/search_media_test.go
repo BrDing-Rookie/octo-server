@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestBuildMediaHits_ImageDimsNoThumb(t *testing.T) {
+func TestBuildMediaHits_ImageThumbURLFromOriginalURL(t *testing.T) {
 	tp := payloadTypeImage
 	doc := Doc{
 		MessageID:  100,
@@ -22,9 +22,10 @@ func TestBuildMediaHits_ImageDimsNoThumb(t *testing.T) {
 	if got.MediaKind != "image" {
 		t.Errorf("media_kind: got %q", got.MediaKind)
 	}
-	// v1.8 image has no thumb concept — thumb_url must stay empty.
-	if got.ThumbURL != "" {
-		t.Errorf("thumb_url should be empty for image, got %q", got.ThumbURL)
+	// v1.8 mapping has no thumb_url field; BFF surfaces image URL so
+	// callers always have a renderable URL (frontend may add CDN sizing).
+	if got.ThumbURL != "http://example.com/a.png" {
+		t.Errorf("thumb_url should be image URL, got %q", got.ThumbURL)
 	}
 	if got.Width != 200 || got.Height != 100 {
 		t.Errorf("dims: %+v", got)
