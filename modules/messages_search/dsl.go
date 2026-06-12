@@ -1,0 +1,187 @@
+package messages_search
+
+import (
+	"encoding/json"
+
+	"github.com/olivere/elastic"
+)
+
+// rawSource turns olivere/elastic's *json.RawMessage hit field into the []byte
+// json.Unmarshal expects. Returns nil for missing sources so the caller's
+// Unmarshal fails fast and the bad row is skipped (rather than panicking on
+// a nil deref).
+func rawSource(s *json.RawMessage) []byte {
+	if s == nil {
+		return nil
+	}
+	return []byte(*s)
+}
+
+// addCommonFilters layers the optional filter clauses (sender, time window)
+// shared across all four endpoints onto a *BoolQuery.
+func addCommonFilters(b *elastic.BoolQuery, filters SearchFilters) {
+	if len(filters.SenderIDs) > 0 {
+		terms := make([]any, 0, len(filters.SenderIDs))
+		for _, s := range filters.SenderIDs {
+			if s != "" {
+				terms = append(terms, s)
+			}
+		}
+		if len(terms) > 0 {
+			b.Filter(elastic.NewTermsQuery("from", terms...))
+		}
+	}
+	if filters.SentAtFrom != "" || filters.SentAtTo != "" {
+		rng := elastic.NewRangeQuery("timestamp")
+		if from, ok := parseSentAt(filters.SentAtFrom, true); ok {
+			rng = rng.Gte(from)
+		}
+		if to, ok := parseSentAt(filters.SentAtTo, false); ok {
+			rng = rng.Lte(to)
+		}
+		b.Filter(rng)
+	}
+}
+
+// applyChannelAndRevoked adds the channel-routing filter and the standard
+// revoked / cmd negation clauses every endpoint shares.
+func applyChannelAndRevoked(b *elastic.BoolQuery, normChannelID string) {
+	b.Filter(elastic.NewTermQuery("channelId", normChannelID))
+	b.MustNot(elastic.NewTermQuery("revoked", true))
+}
+
+// applySort returns a SearchService with the requested sort applied.
+//   - time_desc (default): timestamp desc + messageId desc tiebreaker
+//   - time_asc:           timestamp asc  + messageId asc
+//   - relevance:          timestamp desc + _score desc + messageId desc tiebreaker
+//
+// `relevance` is rejected upstream by the validator for endpoints (e.g.
+// _search_media) where no keyword is involved.
+func applySort(s *elastic.SearchService, sort string) *elastic.SearchService {
+	switch sort {
+	case "time_asc":
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Asc(),
+			elastic.NewFieldSort("messageId").Asc(),
+		)
+	case "relevance":
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Desc(),
+			elastic.NewScoreSort(),
+			elastic.NewFieldSort("messageId").Desc(),
+		)
+	default:
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Desc(),
+			elastic.NewFieldSort("messageId").Desc(),
+		)
+	}
+}
+
+// pickSnippet selects the most informative highlight fragment for a hit.
+// Priority follows A doc §2.1: text content first, then forward search-text,
+// then image caption, then file name. Returns "" when no field highlighted.
+func pickSnippet(h map[string][]string) string {
+	if h == nil {
+		return ""
+	}
+	for _, field := range []string{
+		"payload.text.content",
+		"payload.mergeForward.msgs.searchText",
+		"payload.image.caption",
+		"payload.file.name",
+	} {
+		if frags, ok := h[field]; ok && len(frags) > 0 && frags[0] != "" {
+			return frags[0]
+		}
+	}
+	return ""
+}
+
+// extractSortValues pulls (timestamp, messageId, score?) from a search hit's
+// `sort` array so the next-page cursor can be encoded. The shape depends on
+// the requested sort:
+//   - time_desc / time_asc: sort = [timestamp, messageId]      → score=nil
+//   - relevance:            sort = [timestamp, _score, messageId] → score non-nil
+//
+// Returns zeros / nil when the hit is missing sort values, which means the
+// caller has already exhausted the page or requested an inconsistent sort.
+func extractSortValues(sort []any, isRelevance bool) (int64, int64, *float64) {
+	if isRelevance {
+		if len(sort) < 3 {
+			return 0, 0, nil
+		}
+		ts := numericTo64(sort[0])
+		score := numericToFloat(sort[1])
+		msgID := numericTo64(sort[2])
+		return ts, msgID, &score
+	}
+	if len(sort) < 2 {
+		return 0, 0, nil
+	}
+	return numericTo64(sort[0]), numericTo64(sort[1]), nil
+}
+
+// numericTo64 squashes the variety of numeric shapes JSON unmarshalling can
+// produce (float64 from encoding/json, json.Number, ints from typed APIs)
+// into a single int64.
+func numericTo64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case uint64:
+		return int64(n)
+	}
+	return 0
+}
+
+// numericToFloat is the float64 sibling of numericTo64 for OS _score values,
+// which arrive as float64 from encoding/json but may also be json.Number or
+// integer types depending on the client path.
+func numericToFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	}
+	return 0
+}
+
+// computeCursorPagination derives has_more / next_cursor from an OS hit list.
+// The cursor is taken straight off the last raw hit's Sort array because
+// that's the canonical sort tuple OS itself uses — (timestamp, messageId)
+// for time_*, (timestamp, _score, messageId) for relevance.
+//
+// Invariant: when the last hit's sort tuple decodes to (ts=0, msgID=0)
+// (e.g. mismatched sort mode, missing sort array) we return
+// (hasMore=false, "") rather than (true, "") — wire shape requires a
+// non-empty next_cursor whenever has_more is true (spec v4.2 §1.4).
+func (h *Handler) computeCursorPagination(result *elastic.SearchResult, pageSize int, sort string) (bool, string) {
+	if result == nil || result.Hits == nil || len(result.Hits.Hits) == 0 {
+		return false, ""
+	}
+	if len(result.Hits.Hits) < pageSize {
+		return false, ""
+	}
+	last := result.Hits.Hits[len(result.Hits.Hits)-1]
+	ts, msgID, score := extractSortValues(last.Sort, sort == "relevance")
+	if ts == 0 && msgID == 0 {
+		return false, ""
+	}
+	return true, encodeCursor(h.cfg, ts, msgID, score)
+}
