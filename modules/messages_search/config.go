@@ -18,9 +18,13 @@ type SearchConfig struct {
 	OSUsername  string
 	OSPassword  string
 	OSReadAlias string
-	Timeout     time.Duration
-	RateLimit   RateLimitCfg
-	CursorHMAC  string
+	// OSInsecureHTTP permits sending basic-auth credentials to non-loopback
+	// http:// addresses. Off by default: credentials over cleartext HTTP are
+	// rejected at client build time unless this is explicitly set.
+	OSInsecureHTTP bool
+	Timeout        time.Duration
+	RateLimit      RateLimitCfg
+	CursorHMAC     string
 	// UserAvatarBaseURL, when non-empty, is prepended to the relative
 	// `users/{uid}/avatar` template so the response carries an absolute
 	// URL (spec v4.2 §2.1 / R8). When empty we keep the relative path and
@@ -38,11 +42,12 @@ type RateLimitCfg struct {
 // loadConfig builds a SearchConfig from process environment variables.
 func loadConfig() SearchConfig {
 	return SearchConfig{
-		OSAddrs:     splitCSV(os.Getenv("OCTO_SEARCH_OS_ADDRS"), []string{"http://localhost:9200"}),
-		OSUsername:  os.Getenv("OCTO_SEARCH_OS_USERNAME"),
-		OSPassword:  os.Getenv("OCTO_SEARCH_OS_PASSWORD"),
-		OSReadAlias: defaultStr(os.Getenv("OCTO_SEARCH_OS_READ_ALIAS"), "wukongim-messages-read"),
-		Timeout:     parseDuration(os.Getenv("OCTO_SEARCH_TIMEOUT"), 5*time.Second),
+		OSAddrs:        splitCSV(os.Getenv("OCTO_SEARCH_OS_ADDRS"), []string{"http://localhost:9200"}),
+		OSUsername:     os.Getenv("OCTO_SEARCH_OS_USERNAME"),
+		OSPassword:     os.Getenv("OCTO_SEARCH_OS_PASSWORD"),
+		OSReadAlias:    defaultStr(os.Getenv("OCTO_SEARCH_OS_READ_ALIAS"), "wukongim-messages-read"),
+		OSInsecureHTTP: os.Getenv("OCTO_SEARCH_OS_INSECURE_HTTP") == "true",
+		Timeout:        parseDuration(os.Getenv("OCTO_SEARCH_TIMEOUT"), 5*time.Second),
 		RateLimit: RateLimitCfg{
 			QPS:   parseFloat(os.Getenv("OCTO_SEARCH_RPS"), 5.0),
 			Burst: parseInt(os.Getenv("OCTO_SEARCH_BURST"), 20),

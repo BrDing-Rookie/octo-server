@@ -38,10 +38,13 @@ func TestUIDLimiter_PerUIDIsolation(t *testing.T) {
 	}
 }
 
-func TestUIDLimiter_EmptyUIDDelegates(t *testing.T) {
+func TestUIDLimiter_EmptyKeyFailsClosed(t *testing.T) {
+	// An unidentifiable caller must not be exempt from the search budget;
+	// the middleware substitutes ip:{clientIP} before calling Allow, so an
+	// empty key only ever means a wiring bug — reject it.
 	l := newUIDLimiter(1, 1)
-	if !l.Allow("") {
-		t.Fatalf("empty uid should pass through (upstream limiter handles it)")
+	if l.Allow("") {
+		t.Fatalf("empty key must fail closed")
 	}
 }
 

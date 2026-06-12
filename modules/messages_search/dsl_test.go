@@ -2,8 +2,11 @@ package messages_search
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/olivere/elastic"
 )
 
 // extractDSL serialises a query for asserting structural shape in tests.
@@ -146,5 +149,90 @@ func TestExtractSortValues_Relevance(t *testing.T) {
 	// short sort under relevance returns zeros + nil
 	if ts, msg, score := extractSortValues([]any{float64(1), float64(2)}, true); ts != 0 || msg != 0 || score != nil {
 		t.Fatalf("short relevance sort should give zeros, got %d %d %v", ts, msg, score)
+	}
+}
+
+func TestNumericTo64_JSONNumber(t *testing.T) {
+	// json.Number must keep full int64 precision — this is the path a
+	// NumberDecoder-configured client would produce for snowflake IDs.
+	const big = int64(1817958721236045824)
+	if got := numericTo64(json.Number("1817958721236045824")); got != big {
+		t.Fatalf("json.Number precision lost: got %d want %d", got, big)
+	}
+	if got := numericToFloat(json.Number("12.5")); got != 12.5 {
+		t.Fatalf("json.Number float: got %v want 12.5", got)
+	}
+}
+
+// searchResultWithLastHit builds a minimal one-hit SearchResult whose Sort
+// array carries float64 values (the default-decoder shape) and whose _source
+// carries the full-precision messageId.
+func searchResultWithLastHit(t *testing.T, msgID int64, ts int64) *elastic.SearchResult {
+	t.Helper()
+	src := json.RawMessage([]byte(`{"messageId":` + strconv.FormatInt(msgID, 10) + `,"timestamp":` + strconv.FormatInt(ts, 10) + `}`))
+	return &elastic.SearchResult{
+		Hits: &elastic.SearchHits{
+			Hits: []*elastic.SearchHit{
+				{
+					// Default json.Unmarshal decodes sort numbers as float64,
+					// which rounds above 2^53 — exactly the corruption the
+					// cursor must not inherit.
+					Sort:   []any{float64(ts), float64(msgID)},
+					Source: &src,
+				},
+			},
+		},
+	}
+}
+
+// TestComputeCursorPagination_SnowflakeMessageIDPrecision is the regression
+// test for the P1 review finding: messageId is a snowflake (> 2^53), the Sort
+// array arrives as float64 and rounds it, and the encoded cursor must still
+// carry the exact id (taken from the typed _source) or pagination skips /
+// duplicates messages at timestamp-tied boundaries.
+func TestComputeCursorPagination_SnowflakeMessageIDPrecision(t *testing.T) {
+	const snowflake = int64(1817958721236045827) // > 2^53; int64(float64(x)) != x
+	if int64(float64(snowflake)) == snowflake {
+		t.Fatalf("test value must lose precision through float64 to be meaningful")
+	}
+	cfg := SearchConfig{CursorHMAC: "test-secret"}
+	h := &Handler{cfg: cfg}
+
+	result := searchResultWithLastHit(t, snowflake, 1717000000)
+	hasMore, cursor := h.computeCursorPagination(result, 1, "time_desc")
+	if !hasMore || cursor == "" {
+		t.Fatalf("expected has_more with cursor, got %v %q", hasMore, cursor)
+	}
+	ts, msgID, score, err := decodeCursor(cfg, cursor)
+	if err != nil {
+		t.Fatalf("decodeCursor: %v", err)
+	}
+	if msgID != snowflake {
+		t.Fatalf("cursor messageId lost precision: got %d want %d", msgID, snowflake)
+	}
+	if ts != 1717000000 {
+		t.Fatalf("cursor ts: got %d", ts)
+	}
+	if score != nil {
+		t.Fatalf("time_desc cursor should carry no score")
+	}
+}
+
+// TestComputeCursorPagination_BadSourceNoCursor pins the fail-safe: when the
+// last hit's _source cannot provide a messageId we suppress the cursor
+// entirely instead of emitting a corrupt one.
+func TestComputeCursorPagination_BadSourceNoCursor(t *testing.T) {
+	h := &Handler{cfg: SearchConfig{CursorHMAC: "k"}}
+	bad := json.RawMessage([]byte(`not-json`))
+	result := &elastic.SearchResult{
+		Hits: &elastic.SearchHits{
+			Hits: []*elastic.SearchHit{
+				{Sort: []any{float64(1717000000), float64(123)}, Source: &bad},
+			},
+		},
+	}
+	hasMore, cursor := h.computeCursorPagination(result, 1, "time_desc")
+	if hasMore || cursor != "" {
+		t.Fatalf("bad _source must suppress cursor, got %v %q", hasMore, cursor)
 	}
 }

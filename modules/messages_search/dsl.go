@@ -125,10 +125,24 @@ func extractSortValues(sort []any, isRelevance bool) (int64, int64, *float64) {
 // numericTo64 squashes the variety of numeric shapes JSON unmarshalling can
 // produce (float64 from encoding/json, json.Number, ints from typed APIs)
 // into a single int64.
+//
+// Precision caveat: the float64 case rounds for values above 2^53, so it must
+// never be the source of record for snowflake message IDs — those are read
+// from the typed _source (Doc.MessageID) instead; see computeCursorPagination.
 func numericTo64(v any) int64 {
 	switch n := v.(type) {
 	case float64:
 		return int64(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			f, ferr := n.Float64()
+			if ferr != nil {
+				return 0
+			}
+			return int64(f)
+		}
+		return i
 	case int64:
 		return n
 	case int:
@@ -148,6 +162,12 @@ func numericToFloat(v any) float64 {
 	switch n := v.(type) {
 	case float64:
 		return n
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
 	case float32:
 		return float64(n)
 	case int64:
@@ -163,14 +183,18 @@ func numericToFloat(v any) float64 {
 }
 
 // computeCursorPagination derives has_more / next_cursor from an OS hit list.
-// The cursor is taken straight off the last raw hit's Sort array because
-// that's the canonical sort tuple OS itself uses — (timestamp, messageId)
-// for time_*, (timestamp, _score, messageId) for relevance.
+// The timestamp (and _score for relevance) come off the last raw hit's Sort
+// array — the canonical sort tuple OS itself uses. The messageId tiebreaker
+// is deliberately NOT taken from Sort: the default decoder unmarshals sort
+// values as float64, which rounds snowflake IDs above 2^53 and silently
+// corrupts the cursor at timestamp-tied boundaries (messages skipped or
+// duplicated on the next page). It is read from the typed _source
+// (Doc.MessageID, int64) instead, which keeps full precision.
 //
-// Invariant: when the last hit's sort tuple decodes to (ts=0, msgID=0)
-// (e.g. mismatched sort mode, missing sort array) we return
-// (hasMore=false, "") rather than (true, "") — wire shape requires a
-// non-empty next_cursor whenever has_more is true (spec v4.2 §1.4).
+// Invariant: when the last hit yields ts=0 or msgID=0 (e.g. mismatched sort
+// mode, missing sort array, unparsable _source) we return (hasMore=false, "")
+// rather than emitting a half-valid cursor — wire shape requires a non-empty,
+// usable next_cursor whenever has_more is true (spec v4.2 §1.4).
 func (h *Handler) computeCursorPagination(result *elastic.SearchResult, pageSize int, sort string) (bool, string) {
 	if result == nil || result.Hits == nil || len(result.Hits.Hits) == 0 {
 		return false, ""
@@ -179,9 +203,24 @@ func (h *Handler) computeCursorPagination(result *elastic.SearchResult, pageSize
 		return false, ""
 	}
 	last := result.Hits.Hits[len(result.Hits.Hits)-1]
-	ts, msgID, score := extractSortValues(last.Sort, sort == "relevance")
-	if ts == 0 && msgID == 0 {
+	ts, _, score := extractSortValues(last.Sort, sort == "relevance")
+	msgID := lastHitMessageID(last)
+	if ts == 0 || msgID == 0 {
 		return false, ""
 	}
 	return true, encodeCursor(h.cfg, ts, msgID, score)
+}
+
+// lastHitMessageID reads the full-precision messageId from a hit's typed
+// _source. Returns 0 when the source is missing or malformed, which the
+// caller treats as "no cursor".
+func lastHitMessageID(hit *elastic.SearchHit) int64 {
+	if hit == nil {
+		return 0
+	}
+	var doc Doc
+	if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
+		return 0
+	}
+	return doc.MessageID
 }

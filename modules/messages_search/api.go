@@ -28,7 +28,7 @@ type Handler struct {
 // booting (the request layer will surface UPSTREAM_UNAVAILABLE instead).
 func New(ctx *config.Context) *Handler {
 	cfg := loadConfig()
-	return &Handler{
+	h := &Handler{
 		ctx:          ctx,
 		Log:          log.NewTLog("messages_search"),
 		cfg:          cfg,
@@ -37,6 +37,16 @@ func New(ctx *config.Context) *Handler {
 		limiter:      newUIDLimiter(cfg.RateLimit.QPS, cfg.RateLimit.Burst),
 		cache:        newSenderCache(senderCacheCapacity, senderCacheTTL),
 	}
+	if cfg.CursorHMAC == "" {
+		// The fallback key in cursor.go is a published constant, so cursors
+		// are forgeable. Tolerable (the cursor carries no authorization data
+		// and access is gated server-side) but every real deployment should
+		// set its own key — make the misconfiguration loud instead of silent.
+		h.Warn("OCTO_SEARCH_CURSOR_HMAC is not set; falling back to the " +
+			"built-in default cursor signing key. Set a per-deployment " +
+			"secret in production.")
+	}
+	return h
 }
 
 // Route mounts the four endpoints under /v1/messages with the standard

@@ -55,19 +55,22 @@ func newUIDLimiter(rps float64, burst int) *uidLimiter {
 	}
 }
 
-// Allow returns true if the uid is within budget; false otherwise.
-func (l *uidLimiter) Allow(uid string) bool {
-	if uid == "" {
-		// Unauthenticated path — let the upstream limiter decide.
-		return true
+// Allow returns true if the bucket key is within budget; false otherwise.
+// The key is normally the loginUID; the middleware substitutes an ip:-prefixed
+// key when the uid is missing. An empty key fails closed — AuthMiddleware
+// mounts before us so it should never happen, and silently exempting an
+// unidentifiable caller from the search budget is the wrong default.
+func (l *uidLimiter) Allow(key string) bool {
+	if key == "" {
+		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
-	b, ok := l.buckets[uid]
+	b, ok := l.buckets[key]
 	if !ok {
 		b = &uidBucket{limiter: rate.NewLimiter(l.rps, l.burst)}
-		l.buckets[uid] = b
+		l.buckets[key] = b
 	}
 	b.seen = now
 	if now.Sub(l.last) > 5*time.Minute || len(l.buckets) > uidLimiterMaxBuckets {
@@ -112,10 +115,17 @@ func (l *uidLimiter) sweepLocked(now time.Time) {
 // searchRateLimiter is the gin middleware factory that enforces the per-uid
 // search budget. Errors emit RATE_LIMITED with a soft retry-after hint of one
 // second (the bucket refills at >= 5 RPS).
+//
+// AuthMiddleware mounts before this, so uid is normally always present; if it
+// ever is not, the bucket falls back to the client IP rather than waving the
+// request through unmetered.
 func (h *Handler) searchRateLimiter() wkhttp.HandlerFunc {
 	return func(c *wkhttp.Context) {
-		uid := c.GetLoginUID()
-		if !h.limiter.Allow(uid) {
+		key := c.GetLoginUID()
+		if key == "" {
+			key = "ip:" + c.ClientIP()
+		}
+		if !h.limiter.Allow(key) {
 			respondRateLimited(c, 1)
 			c.Abort()
 			return
