@@ -232,6 +232,17 @@ func buildSearchDSL(req SearchMessagesReq, loginUID string) elastic.Query {
     // 频道精确过滤（routing 同字段）
     b.Filter(elastic.NewTermQuery("channelId", normalizedChannelID(req, loginUID)))
 
+    // P0 修复（2026-06-13，feat/messages-search PR #361）：p2p 跨 Space 隔离
+    // group(2)/thread(5) 的 channel_id 已隐含 Space，不再叠加 spaceId filter；
+    // 仅 channel_type=1 (p2p) 走 spaceId term filter。spaceID 来自 SpaceMiddleware
+    // 设入 ctx 的 `space_id`（X-Space-ID / ?space_id=），handler 在 checkChannelAccess
+    // 之后调 resolveP2PSpaceScope —— 没有 spaceID 时若 RequireSpaceID=true（默认）
+    // 直接 NOT_FOUND（fail-closed），关闭则跳过 filter 并 WARN 一条日志（仅 indexer
+    // rollout 过渡期使用）。
+    if req.ChannelType == 1 && spaceID != "" {
+        b.Filter(elastic.NewTermQuery("spaceId", spaceID))
+    }
+
     // sender 过滤
     if len(req.Filters.SenderIDs) > 0 {
         terms := make([]interface{}, len(req.Filters.SenderIDs))
