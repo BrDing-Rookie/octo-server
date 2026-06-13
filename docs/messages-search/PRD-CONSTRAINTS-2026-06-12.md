@@ -25,12 +25,15 @@
 
 **影响窗口**：约 30 天（消息进入冷存储后索引彻底冻结）。
 
-**产品决策**：
-- A. **本期接受**：在搜索页加一行小字提示 "搜索结果可能包含已撤回 / 已编辑前的内容（30 天内）"，按这个尺度对外发布
-- B. **本期不上线**：等 indexer 团队补撤回事件同步（约 1-2 周工作量）
-- C. **降级**：只放群消息搜索，私聊搜索暂缓（撤回比例低的场景先上）
+**2026-06-13 更新（P0 已修）**：搜索路径现已和"普通读消息"一样应用消息可见性 4 维过滤（`modules/messages_search/visibility.go::filterVisible`）：
+1. `message_extra.revoke=1` → 隐藏
+2. `message_extra.is_deleted=1`（管理员 / 双向删除）→ 隐藏
+3. `message_user_extra.message_is_deleted=1`（当前用户删的）→ 隐藏
+4. `channel_offset.message_seq >= 命中 seq`（用户清空过会话）→ 隐藏
 
-**solo-builder 推荐**：A。撤回比例在主流产品里 < 1%，加提示文案够用，不值得阻塞上线。
+也就是说，**用户自己删除 / 清空 / 管理员删 / 撤回**这 4 种情况下命中已不会再返回——和 IM 客户端的"会话页"展示完全一致。本条剩下的差异只剩"撤回事件没及时刷到 OS 索引导致 OS 命中预过滤偏少（命中后仍被 MySQL 4 维过滤兜底）"，**不会向用户泄漏内容**，只是少量浪费一次过滤计算。
+
+**产品决策**：~~A. 本期接受~~ → **A 已落地**，"已撤回 / 已编辑前的内容"提示文案仍建议保留覆盖编辑后旧值场景。
 
 ---
 
@@ -118,6 +121,22 @@
 | `OCTO_SEARCH_REQUIRE_SPACE_ID` | `true` | p2p 搜索必须带 spaceID。`false` 仅在 indexer 没有写 `spaceId` 之前的过渡窗口使用，每次 p2p 请求都会 WARN 日志报警 |
 
 **长期**：indexer/mapping v1.9 落地 + 存量回填后，永久维持 `OCTO_SEARCH_REQUIRE_SPACE_ID=true`。
+
+---
+
+### ⑥'' 频道访问门禁与读路径对齐（P0 修复 / 2026-06-13）
+
+**用户感知**：从前面 4 个 `/v1/messages/_search*` 端点，能搜到的范围严格等于"在 IM 客户端能进会话页看到消息"的范围；过去能绕过的几种场景已全部封死：
+
+| 维度 | 旧行为（已修复前） | 新行为（已修复） |
+|---|---|---|
+| **群已解散但成员行残留** | 偶发场景下仍可搜到群历史 | 一律 NOT_FOUND（在 `ExistMemberActive` 之前先看 `group.status==Disband`） |
+| **子区已删除（status=3）** | 解析 channel_id 后只查父群成员，能搜到已删子区 | `thread.GetThread` 先校验子区状态，缺失/删除 → NOT_FOUND |
+| **私聊好友关系已断 / 双向拉黑** | 凡同 Space 用户都能输入对方 uid 搜出私聊历史 | 走和 `/messages/channel-files` 同样的 `IsFriend` + 双向 `ExistBlacklist` 门禁，不满足 → NOT_FOUND |
+
+**为什么**：搜索路径过去只检查"群成员"门禁；其他三个维度由 IM 客户端的"会话列表 / 会话页"间接拦下。从 API 层看，搜索是绕过这层防线的"读路径替身"，必须自己重做这些检查。
+
+**实现**：`modules/messages_search/authz.go` 拆分为 `checkP2PAccess` / `checkGroupAccess` / `checkThreadAccess`，各自走和读路径相同的 fail-closed 模板。任意 DB 查询出错均直接 INTERNAL_ERROR（不会"放过去"），单一异常：thread `GetThread` 错误三合一映射为 NOT_FOUND（避免"是 DB 挂了 vs 子区不存在"的枚举 oracle）。
 
 ---
 
