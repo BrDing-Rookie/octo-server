@@ -38,7 +38,7 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 			SenderIDs: []string{"u1", "u2"},
 		},
 	}
-	q := buildSearchMessagesDSL(req, "groupNo")
+	q := buildSearchMessagesDSL(req, "groupNo", "")
 	dsl := extractDSL(t, q.(interface {
 		Source() (any, error)
 	}))
@@ -61,7 +61,7 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 
 func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 	req := SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"}
-	q := buildSearchMediaDSL(req, "g")
+	q := buildSearchMediaDSL(req, "g", "")
 	dsl := extractDSL(t, q.(interface {
 		Source() (any, error)
 	}))
@@ -77,7 +77,7 @@ func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 
 func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 	req := SearchFilesReq{ChannelType: channelTypeGroup, ChannelID: "g"}
-	q := buildSearchFilesDSL(req, "g")
+	q := buildSearchFilesDSL(req, "g", "")
 	js, _ := json.Marshal(extractDSL(t, q.(interface {
 		Source() (any, error)
 	})))
@@ -92,7 +92,7 @@ func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 
 func TestBuildSearchFilesDSL_KeywordIncludesMultiMatch(t *testing.T) {
 	req := SearchFilesReq{ChannelType: channelTypeGroup, ChannelID: "g", Keyword: "report"}
-	q := buildSearchFilesDSL(req, "g")
+	q := buildSearchFilesDSL(req, "g", "")
 	js, _ := json.Marshal(extractDSL(t, q.(interface {
 		Source() (any, error)
 	})))
@@ -107,7 +107,7 @@ func TestBuildSearchFilesDSL_KeywordIncludesMultiMatch(t *testing.T) {
 
 func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 	req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g", Keyword: "k"}
-	q := buildSearchAllDSL(req, "g")
+	q := buildSearchAllDSL(req, "g", "")
 	js, _ := json.Marshal(extractDSL(t, q.(interface {
 		Source() (any, error)
 	})))

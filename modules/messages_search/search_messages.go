@@ -51,6 +51,10 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 	if !h.checkChannelAccess(c, req.ChannelType, req.ChannelID, loginUID) {
 		return
 	}
+	spaceID, ok := h.resolveP2PSpaceScope(c, req.ChannelType, loginUID)
+	if !ok {
+		return
+	}
 
 	client, err := ESClient(h.cfg)
 	if err != nil {
@@ -60,7 +64,7 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 	}
 
 	normID := normalizedChannelID(req.ChannelType, req.ChannelID, loginUID)
-	dsl := buildSearchMessagesDSL(req, normID)
+	dsl := buildSearchMessagesDSL(req, normID, spaceID)
 
 	svc := client.Search().
 		Index(h.cfg.OSReadAlias).
@@ -109,7 +113,7 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 }
 
 // buildSearchMessagesDSL constructs the bool query for /_search.
-func buildSearchMessagesDSL(req SearchMessagesReq, normChannelID string) elastic.Query {
+func buildSearchMessagesDSL(req SearchMessagesReq, normChannelID, spaceID string) elastic.Query {
 	b := elastic.NewBoolQuery()
 	b.Must(elastic.NewMultiMatchQuery(req.Keyword,
 		"payload.text.content^3",
@@ -118,6 +122,7 @@ func buildSearchMessagesDSL(req SearchMessagesReq, normChannelID string) elastic
 		"payload.mergeForward.msgs.searchText",
 	))
 	applyChannelAndRevoked(b, normChannelID)
+	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)
 	b.MustNot(elastic.NewTermQuery("payload.type", payloadTypeCmd))
 	return b

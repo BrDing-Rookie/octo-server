@@ -15,6 +15,12 @@ type Doc struct {
 	Timestamp   int64    `json:"timestamp"`
 	Payload     *Payload `json:"payload,omitempty"`
 	Revoked     bool     `json:"revoked,omitempty"`
+	// SpaceID mirrors the OS doc's `spaceId` keyword introduced in v1.9 to
+	// scope DM (p2p) search by Space membership. The indexer derives this
+	// from `payload.space_id`; older documents without the field are
+	// fail-closed by the term filter in applySpaceIDScope (no match → no
+	// hit) rather than implicitly visible.
+	SpaceID string `json:"spaceId,omitempty"`
 }
 
 // Payload is the structured projection of the message payload. Each typed

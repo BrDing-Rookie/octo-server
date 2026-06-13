@@ -59,6 +59,10 @@ func (h *Handler) searchFiles(c *wkhttp.Context) {
 	if !h.checkChannelAccess(c, req.ChannelType, req.ChannelID, loginUID) {
 		return
 	}
+	spaceID, ok := h.resolveP2PSpaceScope(c, req.ChannelType, loginUID)
+	if !ok {
+		return
+	}
 
 	client, err := ESClient(h.cfg)
 	if err != nil {
@@ -68,7 +72,7 @@ func (h *Handler) searchFiles(c *wkhttp.Context) {
 	}
 
 	normID := normalizedChannelID(req.ChannelType, req.ChannelID, loginUID)
-	dsl := buildSearchFilesDSL(req, normID)
+	dsl := buildSearchFilesDSL(req, normID, spaceID)
 
 	svc := client.Search().
 		Index(h.cfg.OSReadAlias).
@@ -114,9 +118,10 @@ func (h *Handler) searchFiles(c *wkhttp.Context) {
 	c.Response(envelope(items, hasMore, nextCursor))
 }
 
-func buildSearchFilesDSL(req SearchFilesReq, normChannelID string) elastic.Query {
+func buildSearchFilesDSL(req SearchFilesReq, normChannelID, spaceID string) elastic.Query {
 	b := elastic.NewBoolQuery()
 	applyChannelAndRevoked(b, normChannelID)
+	applySpaceIDScope(b, req.ChannelType, spaceID)
 	b.Filter(elastic.NewTermQuery("payload.type", payloadTypeFile))
 	addCommonFilters(b, req.Filters)
 	if req.Keyword != "" {

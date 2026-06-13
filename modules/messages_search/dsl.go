@@ -50,6 +50,32 @@ func applyChannelAndRevoked(b *elastic.BoolQuery, normChannelID string) {
 	b.MustNot(elastic.NewTermQuery("revoked", true))
 }
 
+// applySpaceIDScope layers the per-Space term filter onto the bool query for
+// p2p (channel_type=1) search only. Group and thread searches are already
+// space-scoped at the channel level (channel_id encodes the parent space) so
+// adding a redundant term filter would only mask indexer-mapping mismatches.
+//
+// p2p docs in OS carry `spaceId` from indexer v1.9 (mirrors
+// payload.space_id). Until that mapping is rolled out and the existing
+// corpus is backfilled, doc.spaceId is missing on legacy rows and the term
+// filter matches nothing — that is the intended fail-closed behaviour while
+// the dependency is satisfied. See PRD-CONSTRAINTS / "Person/DM Space
+// Isolation".
+//
+// Empty spaceID is a no-op here: the handler is responsible for either
+// rejecting the request (RequireSpaceID=true) or knowingly skipping the
+// scope filter (RequireSpaceID=false). We never silently include p2p hits
+// for an unknown Space.
+func applySpaceIDScope(b *elastic.BoolQuery, channelType uint8, spaceID string) {
+	if channelType != channelTypePerson {
+		return
+	}
+	if spaceID == "" {
+		return
+	}
+	b.Filter(elastic.NewTermQuery("spaceId", spaceID))
+}
+
 // applySort returns a SearchService with the requested sort applied.
 //   - time_desc (default): timestamp desc + messageId desc tiebreaker
 //   - time_asc:           timestamp asc  + messageId asc

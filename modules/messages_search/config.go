@@ -31,6 +31,18 @@ type SearchConfig struct {
 	// rely on the frontend joining it with its own API base — see
 	// docs/messages-search/FIX-2026-06-12.md for the SRE rollout note.
 	UserAvatarBaseURL string
+	// RequireSpaceID gates the p2p (DM) Space-scoping filter.
+	//
+	//   - true  (default): every p2p search MUST carry a non-empty
+	//     X-Space-ID / `space_id` (resolved via SpaceMiddleware) and the
+	//     OS DSL filters by `spaceId`. Requests without a Space resolve
+	//     to NOT_FOUND (resource=channel) — fail-closed.
+	//   - false: skip the spaceId term filter entirely. Operational
+	//     escape hatch used while the v1.9 indexer / OS mapping is being
+	//     rolled out and the corpus has not been backfilled with the
+	//     `spaceId` field. Logged at WARN on every p2p request so the
+	//     deviation cannot stay enabled silently.
+	RequireSpaceID bool
 }
 
 // RateLimitCfg drives the per-loginUID 5 QPS / 20 burst limiter.
@@ -54,6 +66,7 @@ func loadConfig() SearchConfig {
 		},
 		CursorHMAC:        os.Getenv("OCTO_SEARCH_CURSOR_HMAC"),
 		UserAvatarBaseURL: strings.TrimRight(os.Getenv("OCTO_USER_AVATAR_BASE_URL"), "/"),
+		RequireSpaceID:    parseBool(os.Getenv("OCTO_SEARCH_REQUIRE_SPACE_ID"), true),
 	}
 }
 
@@ -108,6 +121,20 @@ func parseInt(v string, def int) int {
 	}
 	if i, err := strconv.Atoi(v); err == nil && i > 0 {
 		return i
+	}
+	return def
+}
+
+// parseBool resolves a boolean env var, returning the default when unset or
+// unparseable. We use strconv.ParseBool here so "1"/"0", "true"/"false",
+// "TRUE"/"FALSE", etc. all behave the same as the Go-standard set — keeping
+// operator-facing toggles boring.
+func parseBool(v string, def bool) bool {
+	if v == "" {
+		return def
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
 	}
 	return def
 }
