@@ -72,47 +72,53 @@ func (h *Handler) searchMedia(c *wkhttp.Context) {
 
 	normID := normalizedChannelID(req.ChannelType, req.ChannelID, loginUID)
 	dsl := buildSearchMediaDSL(req, normID, spaceID)
+	isRelevance := req.Sort == "relevance"
 
-	svc := client.Search().
-		Index(h.cfg.OSReadAlias).
-		Routing(normID).
-		Query(dsl).
-		Size(pageSize).
-		TrackTotalHits(false)
-	svc = applySort(svc, req.Sort)
-
-	if req.Cursor != "" {
-		ts, msgID, score, err := decodeCursor(h.cfg, req.Cursor)
-		if err != nil {
-			respondValidation(c, "cursor", "malformed")
-			return
-		}
-		if req.Sort == "relevance" {
-			if score == nil {
-				respondValidation(c, "cursor", "stale_cursor_format")
-				return
-			}
-			svc = svc.SearchAfter(ts, *score, msgID)
-		} else {
-			svc = svc.SearchAfter(ts, msgID)
-		}
+	initialAfter, ok := decodeCursorAsSearchAfter(h.cfg, req.Cursor, isRelevance)
+	if !ok {
+		respondValidation(c, "cursor", "malformed")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.Timeout)
 	defer cancel()
-	result, err := svc.Do(ctx)
-	if err != nil {
-		h.Warn("OS search media failed", zap.Error(err))
-		if responder := classifyOSError(err); responder != nil {
-			responder(c)
-		} else {
-			respondInternal(c)
+
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		svc := client.Search().
+			Index(h.cfg.OSReadAlias).
+			Routing(normID).
+			Query(dsl).
+			Size(size).
+			TrackTotalHits(false)
+		svc = applySort(svc, req.Sort)
+		if len(searchAfter) > 0 {
+			svc = svc.SearchAfter(searchAfter...)
 		}
+		res, qerr := svc.Do(ctx)
+		if qerr != nil {
+			return nil, qerr
+		}
+		if res == nil || res.Hits == nil {
+			return nil, nil
+		}
+		return res.Hits.Hits, nil
+	}
+
+	filtered, hasMore, nextCursor, err := h.paginateWithFilter(
+		ctx, loginUID, req.ChannelID, pageSize, initialAfter, isRelevance, osQuery, projectDocRef(req.ChannelID),
+	)
+	if err != nil {
+		if responder := classifyOSError(err); responder != nil {
+			h.Warn("OS search media failed", zap.Error(err))
+			responder(c)
+			return
+		}
+		h.Error("messages_search: visibility filter failed", zap.Error(err))
+		respondInternal(c)
 		return
 	}
 
-	items := h.buildMediaHits(ctx, result, req, loginUID)
-	hasMore, nextCursor := h.computeCursorPagination(result, pageSize, req.Sort)
+	items := h.buildMediaHits(ctx, filtered, req, loginUID)
 
 	recordAudit(c, "search_media", req.ChannelType, req.ChannelID, "", len(items))
 	c.Response(envelope(items, hasMore, nextCursor))
@@ -127,13 +133,13 @@ func buildSearchMediaDSL(req SearchMediaReq, normChannelID, spaceID string) elas
 	return b
 }
 
-func (h *Handler) buildMediaHits(ctx context.Context, result *elastic.SearchResult, req SearchMediaReq, loginUID string) []MediaHit {
-	if result == nil || result.Hits == nil {
+func (h *Handler) buildMediaHits(ctx context.Context, hits []*elastic.SearchHit, req SearchMediaReq, loginUID string) []MediaHit {
+	if len(hits) == 0 {
 		return []MediaHit{}
 	}
-	items := make([]MediaHit, 0, len(result.Hits.Hits))
-	senderIDs := make([]string, 0, len(result.Hits.Hits))
-	for _, hit := range result.Hits.Hits {
+	items := make([]MediaHit, 0, len(hits))
+	senderIDs := make([]string, 0, len(hits))
+	for _, hit := range hits {
 		var doc Doc
 		if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
 			h.Warn("messages_search: bad media _source skipped", zap.Error(err))

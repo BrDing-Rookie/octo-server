@@ -24,6 +24,7 @@ func TestMessagesSearchNoLegacyResponseError(t *testing.T) {
 		"ratelimit.go",
 		"audit.go",
 		"space_scope.go",
+		"visibility.go",
 	}
 	// Banned literals — exact substring match.
 	banned := []string{

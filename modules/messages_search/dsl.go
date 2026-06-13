@@ -45,6 +45,17 @@ func addCommonFilters(b *elastic.BoolQuery, filters SearchFilters) {
 
 // applyChannelAndRevoked adds the channel-routing filter and the standard
 // revoked / cmd negation clauses every endpoint shares.
+//
+// The `MustNot Term(revoked=true)` clause is a best-effort optimisation, NOT
+// a security boundary: indexer v1.8 only sets `revoked` on the initial index
+// write, so any message revoked AFTER initial indexing keeps `revoked=false`
+// in OS until a partial-update job lands (tracked in the v1.10 mapping
+// follow-up). The authoritative check is the post-filter in
+// visibility.filterVisible — that consults `message_extra.revoke=1` from
+// MySQL on every hit, which is the same source of truth the read paths use
+// (see modules/message/api_channel_files.go::filterMessages). Keeping the
+// native term here still trims the page that hits the post-filter for the
+// docs OS *does* have flagged correctly.
 func applyChannelAndRevoked(b *elastic.BoolQuery, normChannelID string) {
 	b.Filter(elastic.NewTermQuery("channelId", normChannelID))
 	b.MustNot(elastic.NewTermQuery("revoked", true))

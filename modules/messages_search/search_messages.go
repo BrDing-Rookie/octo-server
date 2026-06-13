@@ -65,48 +65,55 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 
 	normID := normalizedChannelID(req.ChannelType, req.ChannelID, loginUID)
 	dsl := buildSearchMessagesDSL(req, normID, spaceID)
+	isRelevance := req.Sort == "relevance"
 
-	svc := client.Search().
-		Index(h.cfg.OSReadAlias).
-		Routing(normID).
-		Query(dsl).
-		Highlight(buildSearchMessagesHighlight()).
-		Size(pageSize).
-		TrackTotalHits(false)
-	svc = applySort(svc, req.Sort)
-
-	if req.Cursor != "" {
-		ts, msgID, score, err := decodeCursor(h.cfg, req.Cursor)
-		if err != nil {
-			respondValidation(c, "cursor", "malformed")
-			return
-		}
-		if req.Sort == "relevance" {
-			if score == nil {
-				respondValidation(c, "cursor", "stale_cursor_format")
-				return
-			}
-			svc = svc.SearchAfter(ts, *score, msgID)
-		} else {
-			svc = svc.SearchAfter(ts, msgID)
-		}
+	initialAfter, ok := decodeCursorAsSearchAfter(h.cfg, req.Cursor, isRelevance)
+	if !ok {
+		respondValidation(c, "cursor", "malformed")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.Timeout)
 	defer cancel()
-	result, err := svc.Do(ctx)
-	if err != nil {
-		h.Warn("OS search failed", zap.Error(err))
-		if responder := classifyOSError(err); responder != nil {
-			responder(c)
-		} else {
-			respondInternal(c)
+
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		svc := client.Search().
+			Index(h.cfg.OSReadAlias).
+			Routing(normID).
+			Query(dsl).
+			Highlight(buildSearchMessagesHighlight()).
+			Size(size).
+			TrackTotalHits(false)
+		svc = applySort(svc, req.Sort)
+		if len(searchAfter) > 0 {
+			svc = svc.SearchAfter(searchAfter...)
 		}
+		res, qerr := svc.Do(ctx)
+		if qerr != nil {
+			return nil, qerr
+		}
+		if res == nil || res.Hits == nil {
+			return nil, nil
+		}
+		return res.Hits.Hits, nil
+	}
+
+	filtered, hasMore, nextCursor, err := h.paginateWithFilter(
+		ctx, loginUID, req.ChannelID, pageSize, initialAfter, isRelevance, osQuery, projectDocRef(req.ChannelID),
+	)
+	if err != nil {
+		if responder := classifyOSError(err); responder != nil {
+			h.Warn("OS search failed", zap.Error(err))
+			responder(c)
+			return
+		}
+		// filterVisible failures fall through to here; fail-closed with INTERNAL.
+		h.Error("messages_search: visibility filter failed", zap.Error(err))
+		respondInternal(c)
 		return
 	}
 
-	items := h.buildMessageHits(ctx, result, req, loginUID)
-	hasMore, nextCursor := h.computeCursorPagination(result, pageSize, req.Sort)
+	items := h.buildMessageHits(ctx, filtered, req, loginUID)
 
 	recordAudit(c, "search_messages", req.ChannelType, req.ChannelID, req.Keyword, len(items))
 	c.Response(envelope(items, hasMore, nextCursor))
@@ -143,13 +150,13 @@ func buildSearchMessagesHighlight() *elastic.Highlight {
 
 // buildMessageHits maps the OS hits into the API response shape and joins
 // sender display name + avatar in a single batch.
-func (h *Handler) buildMessageHits(ctx context.Context, result *elastic.SearchResult, req SearchMessagesReq, loginUID string) []MessageHit {
-	if result == nil || result.Hits == nil {
+func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHit, req SearchMessagesReq, loginUID string) []MessageHit {
+	if len(hits) == 0 {
 		return []MessageHit{}
 	}
-	items := make([]MessageHit, 0, len(result.Hits.Hits))
-	senderIDs := make([]string, 0, len(result.Hits.Hits))
-	for _, hit := range result.Hits.Hits {
+	items := make([]MessageHit, 0, len(hits))
+	senderIDs := make([]string, 0, len(hits))
+	for _, hit := range hits {
 		var doc Doc
 		if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
 			h.Warn("messages_search: bad _source skipped", zap.Error(err))

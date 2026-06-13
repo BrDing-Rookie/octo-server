@@ -73,46 +73,53 @@ func (h *Handler) searchFiles(c *wkhttp.Context) {
 
 	normID := normalizedChannelID(req.ChannelType, req.ChannelID, loginUID)
 	dsl := buildSearchFilesDSL(req, normID, spaceID)
+	isRelevance := req.Sort == "relevance"
 
-	svc := client.Search().
-		Index(h.cfg.OSReadAlias).
-		Routing(normID).
-		Query(dsl).
-		Size(pageSize).
-		TrackTotalHits(false)
-	svc = applySort(svc, req.Sort)
-	if req.Cursor != "" {
-		ts, msgID, score, err := decodeCursor(h.cfg, req.Cursor)
-		if err != nil {
-			respondValidation(c, "cursor", "malformed")
-			return
-		}
-		if req.Sort == "relevance" {
-			if score == nil {
-				respondValidation(c, "cursor", "stale_cursor_format")
-				return
-			}
-			svc = svc.SearchAfter(ts, *score, msgID)
-		} else {
-			svc = svc.SearchAfter(ts, msgID)
-		}
+	initialAfter, ok := decodeCursorAsSearchAfter(h.cfg, req.Cursor, isRelevance)
+	if !ok {
+		respondValidation(c, "cursor", "malformed")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.Timeout)
 	defer cancel()
-	result, err := svc.Do(ctx)
-	if err != nil {
-		h.Warn("OS search files failed", zap.Error(err))
-		if responder := classifyOSError(err); responder != nil {
-			responder(c)
-		} else {
-			respondInternal(c)
+
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		svc := client.Search().
+			Index(h.cfg.OSReadAlias).
+			Routing(normID).
+			Query(dsl).
+			Size(size).
+			TrackTotalHits(false)
+		svc = applySort(svc, req.Sort)
+		if len(searchAfter) > 0 {
+			svc = svc.SearchAfter(searchAfter...)
 		}
+		res, qerr := svc.Do(ctx)
+		if qerr != nil {
+			return nil, qerr
+		}
+		if res == nil || res.Hits == nil {
+			return nil, nil
+		}
+		return res.Hits.Hits, nil
+	}
+
+	filtered, hasMore, nextCursor, err := h.paginateWithFilter(
+		ctx, loginUID, req.ChannelID, pageSize, initialAfter, isRelevance, osQuery, projectDocRef(req.ChannelID),
+	)
+	if err != nil {
+		if responder := classifyOSError(err); responder != nil {
+			h.Warn("OS search files failed", zap.Error(err))
+			responder(c)
+			return
+		}
+		h.Error("messages_search: visibility filter failed", zap.Error(err))
+		respondInternal(c)
 		return
 	}
 
-	items := h.buildFileHits(ctx, result, req, loginUID)
-	hasMore, nextCursor := h.computeCursorPagination(result, pageSize, req.Sort)
+	items := h.buildFileHits(ctx, filtered, req, loginUID)
 
 	recordAudit(c, "search_files", req.ChannelType, req.ChannelID, req.Keyword, len(items))
 	c.Response(envelope(items, hasMore, nextCursor))
@@ -133,13 +140,13 @@ func buildSearchFilesDSL(req SearchFilesReq, normChannelID, spaceID string) elas
 	return b
 }
 
-func (h *Handler) buildFileHits(ctx context.Context, result *elastic.SearchResult, req SearchFilesReq, loginUID string) []FileHit {
-	if result == nil || result.Hits == nil {
+func (h *Handler) buildFileHits(ctx context.Context, hits []*elastic.SearchHit, req SearchFilesReq, loginUID string) []FileHit {
+	if len(hits) == 0 {
 		return []FileHit{}
 	}
-	items := make([]FileHit, 0, len(result.Hits.Hits))
-	senderIDs := make([]string, 0, len(result.Hits.Hits))
-	for _, hit := range result.Hits.Hits {
+	items := make([]FileHit, 0, len(hits))
+	senderIDs := make([]string, 0, len(hits))
+	for _, hit := range hits {
 		var doc Doc
 		if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
 			h.Warn("messages_search: bad file _source skipped", zap.Error(err))
