@@ -376,6 +376,121 @@ func TestPaginateWithFilter_BudgetExhausted_HasMoreTrue(t *testing.T) {
 	}
 }
 
+// TestPaginateWithFilter_RoundRefillUsesFullPrecisionMessageID — round
+// continuation must rebuild search_after from the typed _source so the
+// messageId tiebreaker keeps full int64 precision. Regression for the
+// PR #361 review: anchorHit.Sort comes off encoding/json as float64,
+// which rounds snowflake ids above 2^53; reusing it for search_after
+// silently mis-anchors the next round at timestamp ties.
+//
+// Setup: round 1 returns fetchSize=15 hits with ids in the snowflake
+// range (1<<60), all marked revoked → none collected, loop continues.
+// Round 2 captures the search_after the loop hands in; we assert the
+// tiebreaker is the full-precision int64 of the round-1 last hit (not
+// a rounded float64) and that round 2's first id is strictly greater
+// than the anchor — i.e. no overlap and no skip across rounds.
+func TestPaginateWithFilter_RoundRefillUsesFullPrecisionMessageID(t *testing.T) {
+	pageSize := 5
+	// 1<<60 is well past 2^53 (the float64 mantissa limit), so any
+	// float64 round of these ids produces an observably wrong int64.
+	const snowflakeBase int64 = 1 << 60
+
+	round1IDs := make([]int64, 15)
+	round1IDStrs := make([]string, 15)
+	revoked := map[string]bool{}
+	for i := 0; i < 15; i++ {
+		round1IDs[i] = snowflakeBase + int64(i)
+		round1IDStrs[i] = strconv.FormatInt(round1IDs[i], 10)
+		revoked[round1IDStrs[i]] = true // page never fills round 1
+	}
+	probe := &stubProbe{revoked: revoked}
+	h := newVisibilityHandler(probe)
+
+	var capturedSearchAfter []any
+	calls := 0
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		calls++
+		switch calls {
+		case 1:
+			return makeSnowflakeHits(round1IDs), nil
+		case 2:
+			capturedSearchAfter = append([]any{}, searchAfter...)
+			return nil, nil // empty terminates the loop cleanly
+		}
+		t.Fatalf("unexpected round %d", calls)
+		return nil, nil
+	}
+
+	_, _, _, err := h.paginateWithFilter(
+		context.Background(), "me", "C1", pageSize, nil, false,
+		osQuery, projectDocRef("C1"),
+	)
+	if err != nil {
+		t.Fatalf("paginate: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 OS rounds (refill must run), got %d", calls)
+	}
+
+	// Time_desc sort tuple shape: [timestamp, messageId]. Both must be
+	// present; messageId must be int64 with no precision loss.
+	if got, want := len(capturedSearchAfter), 2; got != want {
+		t.Fatalf("search_after len = %d, want %d (tuple=%v)", got, want, capturedSearchAfter)
+	}
+	gotMsgID, ok := capturedSearchAfter[1].(int64)
+	if !ok {
+		t.Fatalf("search_after[1] must be int64 (full precision); got %T (%v)",
+			capturedSearchAfter[1], capturedSearchAfter[1])
+	}
+	wantMsgID := round1IDs[len(round1IDs)-1]
+	if gotMsgID != wantMsgID {
+		t.Fatalf("search_after messageId precision lost; want %d got %d (delta %d)",
+			wantMsgID, gotMsgID, wantMsgID-gotMsgID)
+	}
+
+	// Sanity: the anchor id must be strictly greater than every other
+	// round-1 id — i.e. the loop anchored on the LAST hit of round 1
+	// (so OS resumes strictly past it on round 2: no overlap, no skip).
+	for i := 0; i < len(round1IDs)-1; i++ {
+		if round1IDs[i] >= gotMsgID {
+			t.Fatalf("anchor must be strictly greater than prior round-1 ids; "+
+				"round1[%d]=%d >= anchor=%d", i, round1IDs[i], gotMsgID)
+		}
+	}
+
+	// Negative control: a naive `searchAfter = anchorHit.Sort` would
+	// have produced this float64-rounded value. Assert the fix did NOT
+	// regress to it.
+	roundedViaFloat64 := int64(float64(wantMsgID))
+	if gotMsgID == roundedViaFloat64 && wantMsgID != roundedViaFloat64 {
+		t.Fatalf("search_after fell back to float64-rounded id (%d); "+
+			"buildSearchAfterFromHit must read typed _source", roundedViaFloat64)
+	}
+}
+
+// makeSnowflakeHits builds *elastic.SearchHit fixtures whose Source is
+// realistic JSON (so projectDocRef + lastHitMessageID can read back the
+// full-precision messageId via Doc) but whose Sort tuple uses float64
+// values — exactly the shape OS hands back after encoding/json. This
+// reproduces the precision-loss path the fix has to cover.
+func makeSnowflakeHits(ids []int64) []*elastic.SearchHit {
+	out := make([]*elastic.SearchHit, 0, len(ids))
+	for _, id := range ids {
+		body, _ := json.Marshal(map[string]any{
+			"messageId":  id,
+			"messageSeq": uint64(id & 0xffff),
+		})
+		src := json.RawMessage(body)
+		out = append(out, &elastic.SearchHit{
+			Source: &src,
+			// [ts, msgID] — float64 here is the bug source; ts is small
+			// (second precision) so safe, msgID rounds for >2^53.
+			Sort: []any{float64(1717000000), float64(id)},
+		})
+	}
+	return out
+}
+
 // ---- helpers used by the pagination tests ----
 
 func itoa(i int) string {

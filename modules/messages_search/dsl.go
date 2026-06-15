@@ -261,3 +261,46 @@ func lastHitMessageID(hit *elastic.SearchHit) int64 {
 	}
 	return doc.MessageID
 }
+
+// buildSearchAfterFromHit reconstructs an OS search_after tuple from a hit
+// for in-loop round-refill (paginateWithFilter). The messageId tiebreaker
+// is read from the typed _source rather than hit.Sort: JSON-decoded sort
+// values are float64, which rounds snowflake ids above 2^53 and corrupts
+// the resume boundary at timestamp ties. Same policy as
+// computeCursorPagination, so the internal round-refill anchor and the
+// external next_cursor share one full-precision id source.
+//
+// Sort tuple shapes (must match decodeCursorAsSearchAfter and the sort
+// clauses in dsl.go::buildSearch):
+//   - time_desc / time_asc: [timestamp, messageId]
+//   - relevance:            [timestamp, _score, messageId]
+//
+// Timestamp comes off hit.Sort[0] as float64 — safe at second precision.
+// _score for relevance comes off hit.Sort[1] as float64 — same as OS uses
+// internally.
+//
+// Returns ok=false when the typed _source can't be parsed or hit.Sort is
+// malformed. Caller should stop the round loop on !ok rather than resume
+// on a corrupt boundary.
+func buildSearchAfterFromHit(hit *elastic.SearchHit, isRelevance bool) ([]any, bool) {
+	if hit == nil {
+		return nil, false
+	}
+	msgID := lastHitMessageID(hit)
+	if msgID == 0 {
+		return nil, false
+	}
+	if isRelevance {
+		if len(hit.Sort) < 3 {
+			return nil, false
+		}
+		ts := numericTo64(hit.Sort[0])
+		score := numericToFloat(hit.Sort[1])
+		return []any{ts, score, msgID}, true
+	}
+	if len(hit.Sort) < 2 {
+		return nil, false
+	}
+	ts := numericTo64(hit.Sort[0])
+	return []any{ts, msgID}, true
+}

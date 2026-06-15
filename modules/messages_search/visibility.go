@@ -308,7 +308,17 @@ func (h *Handler) paginateWithFilter(
 		if !moreInOS {
 			break
 		}
-		searchAfter = anchorHit.Sort
+		// Rebuild search_after from the typed _source rather than reusing
+		// anchorHit.Sort. JSON-decoded sort values are float64, which rounds
+		// snowflake messageId tiebreakers above 2^53 and corrupts the
+		// resume boundary at timestamp ties. Mirrors the typed-source
+		// policy in computeCursorPagination so internal round-refill and
+		// external cursor share one full-precision id source.
+		nextSA, ok := buildSearchAfterFromHit(anchorHit, isRelevanceSort)
+		if !ok {
+			break
+		}
+		searchAfter = nextSA
 	}
 
 	hasMore := moreInOS && anchorHit != nil
