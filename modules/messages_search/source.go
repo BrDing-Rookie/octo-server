@@ -29,11 +29,6 @@ type Doc struct {
 	// indexer write — see CONSTRAINTS-2026-06-12 for the transient
 	// fail-open while the field is unwritten.
 	Visibles []string `json:"visibles,omitempty"`
-	// Expire is the TTL in seconds attached to ephemeral messages. The read
-	// path hides the message once `time.Now().Unix() - Expire >= Timestamp`
-	// (modules/message/api.go around the expire branch). Search mirrors the
-	// same predicate post-filter so expired content cannot leak via search.
-	Expire uint32 `json:"expire,omitempty"`
 }
 
 // Payload is the structured projection of the message payload. Each typed

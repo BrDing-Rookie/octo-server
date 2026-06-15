@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/olivere/elastic"
@@ -620,87 +619,15 @@ func TestFilterVisible_VisiblesEmpty_FailOpen(t *testing.T) {
 	}
 }
 
-// TestFilterVisible_ExpireExpired_Dropped — `now - expire >= timestamp`
-// matches the read-path predicate in modules/message/api.go (expire
-// branch). Hit must be dropped.
-func TestFilterVisible_ExpireExpired_Dropped(t *testing.T) {
-	probe := &stubProbe{}
-	h := newVisibilityHandler(probe)
-	// Send time 1 hour ago, TTL 60 seconds → long expired.
-	sentAt := time.Now().Unix() - 3600
-	keep, err := h.filterVisible(context.Background(), "me", "C1", []msgRef{
-		{MessageID: "old", Expire: 60, Timestamp: sentAt},
-	})
-	if err != nil {
-		t.Fatalf("filter: %v", err)
-	}
-	if _, leaked := keep["old"]; leaked {
-		t.Fatalf("expired message must be dropped (TTL leak); got %v", keepKeysSorted(keep))
-	}
-}
-
-// TestFilterVisible_ExpireNotYetExpired_Kept — message sent just now with
-// a long TTL; the predicate is not satisfied so the hit survives.
-func TestFilterVisible_ExpireNotYetExpired_Kept(t *testing.T) {
-	probe := &stubProbe{}
-	h := newVisibilityHandler(probe)
-	sentAt := time.Now().Unix() // just sent
-	keep, err := h.filterVisible(context.Background(), "me", "C1", []msgRef{
-		{MessageID: "fresh", Expire: 3600, Timestamp: sentAt},
-	})
-	if err != nil {
-		t.Fatalf("filter: %v", err)
-	}
-	if _, ok := keep["fresh"]; !ok {
-		t.Fatalf("non-expired ephemeral must survive; got %v", keepKeysSorted(keep))
-	}
-}
-
-// TestFilterVisible_ExpireZero_FailOpen — Expire=0 means non-ephemeral;
-// the gate is skipped regardless of timestamp. Same fail-open posture as
-// the read path (the predicate is guarded by `Expire > 0`).
-func TestFilterVisible_ExpireZero_FailOpen(t *testing.T) {
-	probe := &stubProbe{}
-	h := newVisibilityHandler(probe)
-	keep, err := h.filterVisible(context.Background(), "me", "C1", []msgRef{
-		{MessageID: "regular", Expire: 0, Timestamp: 1}, // ancient timestamp, no TTL
-	})
-	if err != nil {
-		t.Fatalf("filter: %v", err)
-	}
-	if _, ok := keep["regular"]; !ok {
-		t.Fatalf("Expire=0 must fail-open (non-ephemeral message); got %v", keepKeysSorted(keep))
-	}
-}
-
-// TestFilterVisible_ExpireMissingTimestamp_FailOpen — even with Expire>0,
-// a missing Timestamp (legacy doc, indexer didn't backfill) fails open.
-// The predicate requires both fields; either zero is treated as "no gate"
-// to avoid false positives that would silently hide real messages.
-func TestFilterVisible_ExpireMissingTimestamp_FailOpen(t *testing.T) {
-	probe := &stubProbe{}
-	h := newVisibilityHandler(probe)
-	keep, err := h.filterVisible(context.Background(), "me", "C1", []msgRef{
-		{MessageID: "legacy", Expire: 60, Timestamp: 0},
-	})
-	if err != nil {
-		t.Fatalf("filter: %v", err)
-	}
-	if _, ok := keep["legacy"]; !ok {
-		t.Fatalf("Expire>0 with Timestamp=0 must fail-open; got %v", keepKeysSorted(keep))
-	}
-}
-
-// TestProjectDocRef_PopulatesVisiblesAndExpire — projectDocRef must read
-// the typed _source so visibles / expire / timestamp reach filterVisible.
-// Regression guard: a project that drops these fields silently disables
-// gates 5–6 even when the indexer is writing them.
-func TestProjectDocRef_PopulatesVisiblesAndExpire(t *testing.T) {
+// TestProjectDocRef_PopulatesVisibles — projectDocRef must read the typed
+// _source so visibles reaches filterVisible. Regression guard: a project
+// that drops this field silently disables the visibles gate even when the
+// indexer is writing it.
+func TestProjectDocRef_PopulatesVisibles(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"messageId":  int64(42),
 		"messageSeq": uint64(7),
 		"timestamp":  int64(1717000000),
-		"expire":     uint32(120),
 		"visibles":   []string{"alice", "bob"},
 	})
 	src := json.RawMessage(body)
@@ -709,12 +636,6 @@ func TestProjectDocRef_PopulatesVisiblesAndExpire(t *testing.T) {
 	ref, ok := projectDocRef("C1")(hit)
 	if !ok {
 		t.Fatalf("projectDocRef must accept a well-formed hit")
-	}
-	if ref.Expire != 120 {
-		t.Fatalf("Expire not propagated; want 120 got %d", ref.Expire)
-	}
-	if ref.Timestamp != 1717000000 {
-		t.Fatalf("Timestamp not propagated; want 1717000000 got %d", ref.Timestamp)
 	}
 	if !reflect.DeepEqual(ref.Visibles, []string{"alice", "bob"}) {
 		t.Fatalf("Visibles not propagated; got %v", ref.Visibles)
