@@ -216,61 +216,72 @@
 
 ---
 
-## 决议 D24：visibles 白名单 + expire TTL post-filter（2026-06-15 追加）
+## 决议 D24：visibles 白名单 post-filter（2026-06-15 追加；2026-06-15 修订）
 
 > 触发：PR #361 review (yujiawei 11:24 / lml2468 11:25)。权威读路径
 > `modules/message/api.go::MsgSyncResp.from` 隐藏消息靠 6 个信号；
 > 此前 `filterVisible` 只覆盖前 4 个（revoke/全局删/用户删/channel offset），
-> 漏 visibles 白名单（read-path :2956）和 expire TTL 过期（read-path :2978）
-> → 群成员能搜出不在 visibles 白名单的定向消息或已过期消息内容。
+> 漏 visibles 白名单（read-path :2956）→ 群成员能搜出不在 visibles
+> 白名单的定向消息内容。
+>
+> **修订说明（2026-06-15）**：本节最初同时提了 visibles 与 expire 双 gate，
+> 在后续调查（见 D25）中确认 expire 字段在 octo-server 生产是死字段，
+> 已撤掉 expire gate；本节仅保留 visibles。
 
 ### 已落地（本 PR）
 
-1. **OS doc schema**：`Doc` 加 `visibles []string`、`expire uint32` 字段
-   （`modules/messages_search/source.go`）。`timestamp` 字段已存在，与 `expire`
-   配对计算过期。
+1. **OS doc schema**：`Doc` 加 `visibles []string` 字段
+   （`modules/messages_search/source.go`）。
 2. **post-filter gate**（`modules/messages_search/visibility.go::filterVisible`）：
    - **visibles 白名单**：`len(Visibles)>0` 且 `loginUID ∉ Visibles` → 丢弃
-   - **expire TTL**：`Expire>0 && Timestamp>0 && now-Expire >= Timestamp` → 丢弃
-3. `projectDocRef` 从 typed `_source` 读取这三个字段塞进 `msgRef`，过滤循环就地判定，
-   不走 DB（visibles/expire 是消息本身字段，无需额外 MySQL roundtrip）。
+3. `projectDocRef` 从 typed `_source` 读取 `visibles` 塞进 `msgRef`，过滤循环就地判定，
+   不走 DB（visibles 是消息本身字段，无需额外 MySQL roundtrip）。
 
 ### 暂态妥协：indexer 字段未补齐期间的 fail-open
 
-当前 `wukongim-message-indexer` **尚未把 visibles / expire 写入 OS `_source`**。
+当前 `wukongim-message-indexer` **尚未把 visibles 写入 OS `_source`**。
 本 PR 提前在 search 端落 schema + gate，**字段就绪即生效**（lml2468 原话）。
 indexer 补字段前的过渡期：
 
 - `visibles` 字段缺失 → JSON 反序列化为 `nil`，`len(r.Visibles)==0` → 跳过白名单 gate
-- `expire` 字段缺失 → 反序列化为 `0`，`r.Expire==0` → 跳过 TTL gate
-- `timestamp` 字段已经在 v1.8 mapping 写入；即便 expire 后续补了，timestamp 缺失
-  也会 fail-open（gate 要求两个字段都非零）
 
-**这与权威读路径的语义一致**：read path 同样在 `Expire > 0` 才查过期，
-在 `visibles` 为非空数组才查白名单。区别是 read path 直接从 MySQL
-`message.payload` 读这两个字段，**永远准确**；search 这边依赖 indexer
-异步写入 OS doc，**未写入则等同于"消息没设 visibles / 没 expire"**。
+**这与权威读路径的语义一致**：read path 同样在 `visibles` 为非空数组才查白名单。
+区别是 read path 直接从 MySQL `message.payload` 读这个字段，**永远准确**；
+search 这边依赖 indexer 异步写入 OS doc，**未写入则等同于"消息没设 visibles"**。
+
+### 为什么仍要 gate（而非"反正没人写，跳过即可"）
+
+生产里 visibles **不是空字段**：服务端生成的群退群事件（`modules/group/api.go:2995`）、
+入群申请（`modules/group/invite.go`）等系统消息真在用 `payload.visibles` 限定可见范围
+（典型如"只让群管理员看到"）。读路径的 4 条权威可见性入口里 3 条都过滤它
+（`MsgSyncResp.from` / `respondSingleMessage` / 旧 `modules/search/api.go:402`）。
+搜索若不 gate，群普通成员可以搜出群管才能看到的事件内容。
+
+用户消息（私聊/群聊）链路目前不写 visibles —— octo-server `Message.sendMessage`
+全链路无 `payload["visibles"] = ...` 写入，客户端理论上可塞但目前没产品功能挂在
+visibles 上。但只要 indexer 把服务端系统消息也索引（v1.9 必然），visibles gate
+就成为正确性必须项。
 
 ### Fail-open 的安全 vs 可见性 trade-off
 
 明确选 fail-open 而非 fail-closed 的理由：
 
 - **fail-closed（缺失字段一律丢弃）**会让现有所有未补字段的历史 doc 全部从
-  搜索结果中消失 — 99.9% 的消息根本没设 visibles / expire，正常用户搜历史
-  会得到空白页面，UX 灾难
+  搜索结果中消失 — 99.9% 的消息根本没设 visibles，正常用户搜历史会得到
+  空白页面，UX 灾难
 - **fail-open**只在两类场景泄露：
-  1. 历史 doc 上有 visibles / expire 字段但 indexer 没写出来 — 实际不存在，
-     因为 indexer 之前根本不解析这两个字段
-  2. indexer 上线 v1.9（写入这两字段）之前的窗口期，新消息也走老 indexer
-     不写 visibles/expire — 这个窗口期是有限的，且需要 indexer 升级
-- 本期 search 上线时 indexer 一并升级到写入 visibles / expire 是收尾动作
+  1. 历史 doc 上有 visibles 字段但 indexer 没写出来 — 实际不存在，
+     因为 indexer 之前根本不解析 visibles
+  2. indexer 上线 v1.9（写入 visibles）之前的窗口期，新消息也走老 indexer
+     不写 visibles — 这个窗口期是有限的，且需要 indexer 升级
+- 本期 search 上线时 indexer 一并升级到写入 visibles 是收尾动作
 
 ### 跟进项（non-blocking）
 
 | # | 跟进 | 责任 |
 |---|---|---|
-| 1 | indexer 在 v1.9 加 `visibles: keyword[]` + `expire: integer` 写入逻辑 | indexer 团队 |
-| 2 | 上线后 sample 一批 OS doc 验证字段非空率 ≥ 99%，否则 gate 永久 fail-open | search owner |
+| 1 | indexer 在 v1.9 加 `visibles: keyword[]` 写入逻辑 | indexer 团队 |
+| 2 | 上线后 sample 一批 OS doc 验证字段非空率，群系统消息 visibles 召回率 ≥ 99% | search owner |
 | 3 | 若发现字段写入率低于阈值，评估改为 fail-closed（接受 UX 妥协） | search owner |
 
 ### 不做（明确 out-of-scope）
@@ -278,6 +289,63 @@ indexer 补字段前的过渡期：
 - 不在本 PR 改 indexer（那是另一个 PR / 另一个仓库）
 - 不为 visibles 加 OS-side `terms` 过滤（pre-filter）—— 仅 post-filter 是足够的
   正确性保证，pre-filter 是性能优化，等 OS 字段填充率稳定后再评估
-- 不查 MySQL `message.payload` 实时拉 visibles / expire —— 等于把搜索退化成
+- 不查 MySQL `message.payload` 实时拉 visibles —— 等于把搜索退化成
   一次 IN 查全表 payload，规模上不可行。post-filter 的语义已经正确
 
+---
+
+## 决议 D25：expire 字段在 octo-server 生产是死字段，搜索不加 gate（2026-06-15）
+
+> 触发：D24 初稿同时为 visibles + expire 各加一条 post-filter gate。
+> 之后逐链路追溯 expire 字段的写入路径，确认它在 octo-server → wukongim
+> 这条链路上**没有 per-message 写入入口**，给搜索加 expire gate 是防御
+> 一个不存在的风险，制造假安全感而无实际收益。本节记录调查证据，并明确
+> 撤回 D24 中的 expire gate（visibles gate 保留）。
+
+### 调查链路
+
+1. **octo-server → wukongim 的 `MsgSendReq` 没有 Expire 字段**
+   - octo-lib `config/msg.go` 的
+     `type MsgSendReq struct { Header / Setting / FromUID / ChannelID / ChannelType / StreamNo / Subscribers / Payload }`
+     仅 8 字段，**无 Expire**
+   - 所有 octo-server 调 `ctx.SendMessage(MsgSendReq)` 的入口
+     （用户消息 `Message.sendMessage` / Bot API / OBO fanout / Manager / incomingwebhook）
+     都无法把 per-message Expire 传给 wukongim
+
+2. **`channel_setting.msg_auto_delete` 不入消息存储链路**
+   - `CreateOrUpdateMsgAutoDelete` 仅 `UPDATE channel_setting SET msg_auto_delete=?`
+   - 下游消费方只有 `channelResp.Extra["msg_auto_delete"]` 给客户端读 +
+     `/channels/.../message/autodelete` 接口设置时发条 Tip 系统消息
+   - **不告诉 wukongim、不写 message 表 expire 列、不参与任何消息发送**
+   - 实际产品作用：客户端侧 self-destruct UI 提示
+
+3. **wukongim 回调 webhook 里的 `MessageResp.Expire`**（octo-lib `config/msg.go:953`）
+   - 来源是 wukongim 全局配置 `MessageExpire: time.Hour * 24 * 7`
+   - **per-message 语义不存在**
+
+4. **后果**：octo-server 的 message 表 expire 列对所有消息要么全 0、要么全局统一值；
+   权威读路径 `MsgSyncResp.from` (`modules/message/api.go:2919`) 那段过期判断在
+   生产里几乎永远进不到 `IsDeleted=1` 那条分支。
+
+### 决议
+
+搜索路径**不**为 Expire 加 gate。理由：
+
+- 没有真实风险，加 gate 只是制造假安全感
+- 每条无意义的 gate 都增加未来维护负担（解读 / 边界 / 测试），带来负熵
+- visibles 那条 gate 是真在防御真实泄漏路径（D24 已论证），与 expire 不可类比
+
+### 未来如何重新启用
+
+如果未来 octo-lib 扩 `MsgSendReq` schema 加 Expire 字段、wukongim 实现 per-message
+TTL、indexer 把 expire 写入 OS doc，则按 D24 visibles gate 的实现模式在
+`filterVisible` 里加回 expire 分支：
+
+```go
+if r.Expire > 0 && r.Timestamp > 0 && nowUnix-int64(r.Expire) >= r.Timestamp {
+    continue
+}
+```
+
+同时需要在 `Doc` 加回 `Expire uint32` / 在 `msgRef` 加 `Expire/Timestamp` /
+在 `projectDocRef` 投影这两字段，以及对应单元测试。
