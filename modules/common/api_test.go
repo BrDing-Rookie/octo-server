@@ -248,8 +248,8 @@ func TestGetAppConfig_MessagesSearchOn_DefaultsZero(t *testing.T) {
 }
 
 // DB 写入 search.messages_on=1 时 appconfig 必须下发 1：admin 在管理台 toggle
-// 后客户端下次拉配置即可看到搜索入口出现，4 个 /v1/messages/_search* 也同步
-// 放行 —— 单一真源驱动客户端隐藏 + 服务端拒绝。
+// 后客户端下次拉配置即可看到搜索入口出现。后端 /v1/messages/_search* endpoint
+// 不接此开关（仅前端展示信号），所以这里只断言 appconfig 下发的值。
 func TestGetAppConfig_MessagesSearchOn_DBOverride(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)

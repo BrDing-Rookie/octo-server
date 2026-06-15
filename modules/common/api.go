@@ -760,9 +760,12 @@ type appConfigResp struct {
 	// 搜索 tab 等）。来源 system_setting search.messages_on，默认 0=关闭。
 	//
 	// 与 app_config.version 解耦：admin 在管理台 toggle 后老客户端命中 version
-	// 短路分支仍必须看到最新值，否则被本地缓存住。后端 4 个 /v1/messages/_search*
-	// 也走同一个 getter，客户端隐藏与服务端拒绝由单一真源驱动，与
-	// LocalLoginOff / DisableUserCreateSpace 同模式。
+	// 短路分支仍必须看到最新值，否则被本地缓存住。与 LocalLoginOff /
+	// DisableUserCreateSpace 字段同模式。
+	//
+	// 注意：本字段仅作前端展示信号。后端 /v1/messages/_search* endpoint 不接
+	// 此开关，行为不变（OS 就绪 200，OS 不就绪由 classifyOSError 返 503/400）。
+	// 想从后端层面关闭搜索功能，由部署侧不部署 OS / 不配置 OCTO_SEARCH_OS_ADDRS 实现。
 	MessagesSearchOn int `json:"messages_search_on"`
 }
 

@@ -118,11 +118,14 @@ var systemSettingSchema = []settingDef{
 	{Category: "incomingwebhook", Key: "max_per_creator", Type: settingTypeInt, Description: "单个普通成员/机器人在一个群内最多可创建的 Webhook 数量（群主/管理员不受限）", Positive: true,
 		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.IncomingWebhookMaxPerCreator()) }},
 
-	// 消息搜索功能总开关 — 关闭后 4 个 /v1/messages/_search* endpoint 直接返回
-	// NOT_FOUND，appconfig 下发的 messages_search_on=0 让前端隐藏入口。
-	// 默认关闭：messages_search 模块依赖 OpenSearch + kafka indexer 联动，
-	// 环境就绪前先关闭避免给前端展示一个会 503 的入口。
-	{Category: "search", Key: "messages_on", Type: settingTypeBool, Description: "是否开启消息搜索功能（关闭后聊天搜索入口隐藏，所有搜索 API 返回 NOT_FOUND）",
+	// 消息搜索功能开关 — appconfig 下发 messages_search_on 给客户端控制
+	// 入口显隐。默认关闭：messages_search 模块依赖 OpenSearch + kafka indexer
+	// 联动，环境就绪前先关闭避免给前端展示一个会 503 的入口。
+	//
+	// 注意：本 toggle 仅作前端展示信号；后端 /v1/messages/_search* endpoint
+	// 不接此开关，行为不变（OS 就绪 200，OS 不就绪 classifyOSError 返 503/400）。
+	// 想从后端层面关闭搜索功能，由部署侧不部署 OS / 不配置 OCTO_SEARCH_OS_ADDRS 实现。
+	{Category: "search", Key: "messages_on", Type: settingTypeBool, Description: "是否开启消息搜索功能（关闭后客户端隐藏聊天搜索入口；后端 API 行为不受影响）",
 		Effective: func(s *SystemSettings) string { return boolToCanonical(s.MessagesSearchOn()) }},
 
 	// Email server config — formerly yaml-only (Support.* in config.go).

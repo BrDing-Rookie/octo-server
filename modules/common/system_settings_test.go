@@ -479,10 +479,12 @@ func TestSystemSettings_SpaceDisableUserCreate_EnvNegativeSpellings(t *testing.T
 	}
 }
 
-// MessagesSearchOn 默认必须 false：DB 缺行 / 空值 / 任意非 "1" 字面量 都
-// 视为关闭。这是 messages_search 模块的「上线安全姿态」—— 环境未就绪前
-// 客户端搜索入口隐藏 + 4 个 endpoint 返 NOT_FOUND，admin 显式 toggle 才放行。
-// 与 SpaceDisableUserCreate 不同：本 helper 不带 env fallback，DB 单一真源。
+// MessagesSearchOn 默认必须 false：DB 缺行 / 空值 / 任意非 getBool 合法字面量
+// 都视为关闭。这是 messages_search 模块的「上线安全姿态」—— 环境未就绪前
+// 让客户端隐藏聊天搜索入口，admin 显式 toggle 才放行前端展示。后端
+// /v1/messages/_search* endpoint 不接此开关（行为不变），因此 toggle 仅作
+// 前端展示信号。与 SpaceDisableUserCreate 不同：本 helper 不带 env fallback，
+// DB 单一真源。
 func TestSystemSettings_MessagesSearchOn_DefaultsFalse(t *testing.T) {
 	s := newTestSystemSettings(t, nil)
 	assert.False(t, s.MessagesSearchOn(),
@@ -506,12 +508,20 @@ func TestSystemSettings_MessagesSearchOn_DBValueWins(t *testing.T) {
 	require.NoError(t, s.db.upsert("search", "messages_on", "true", settingTypeBool, ""))
 	require.NoError(t, s.Reload())
 	assert.True(t, s.MessagesSearchOn(), "DB=true → 开启")
+
+	// "TRUE" → 同 "1"（getBool 同时识别全大写字面量；这条用例锁住「TRUE 是
+	// 合法 true 字面量，不属于 unknown」的契约，避免把它错误塞进 fallback 列表）
+	require.NoError(t, s.db.upsert("search", "messages_on", "TRUE", settingTypeBool, ""))
+	require.NoError(t, s.Reload())
+	assert.True(t, s.MessagesSearchOn(), "DB=TRUE → 开启")
 }
 
 // 任意未知字面量 → fallback false（与其他 bool 设置一致）。覆盖直接改 DB
-// 绕过 admin 写校验的边缘场景。
+// 绕过 admin 写校验的边缘场景。注意 "TRUE" / "FALSE" 是 getBool 的合法字面量
+// (见 system_settings.go::getBool 的 case 分支), 所以不在本列表里 ——
+// "TRUE" 的正向覆盖由 DBValueWins 测试承担。
 func TestSystemSettings_MessagesSearchOn_UnknownLiteralFallsBackFalse(t *testing.T) {
-	for _, bad := range []string{"yes", "on", "TRUE", "T", "random", " 1 "} {
+	for _, bad := range []string{"yes", "on", "T", "random", " 1 "} {
 		t.Run(bad, func(t *testing.T) {
 			s := &SystemSettings{}
 			snap := map[string]string{

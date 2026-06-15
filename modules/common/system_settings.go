@@ -508,13 +508,17 @@ func parseSpaceDisableUserCreateEnv(v string) bool {
 	return false
 }
 
-// MessagesSearchOn 返回消息搜索功能是否开启。
+// MessagesSearchOn 返回消息搜索功能是否开启（appconfig 前端展示信号）。
 //
-// DB 缺行 / 显式 false / 任意非 "1" 字面量 → false（功能关闭，前端隐藏入口、
-// 4 个 /v1/messages/_search* endpoint 直接 NOT_FOUND）。这是默认安全姿态：
-// messages_search 依赖 OpenSearch + kafka indexer 联动，环境未就绪时返回
-// 一个 200 但 503 的搜索入口对用户体验更差。Admin 在管理台显式开启
-// （settings.search.messages_on=1）才放行。
+// DB 缺行 / 显式 false / 任意非 "1" 字面量 → false（功能关闭，前端隐藏
+// 搜索入口）。这是默认安全姿态：messages_search 依赖 OpenSearch + kafka
+// indexer 联动，环境未就绪时先让前端不展示入口比展示一个 503 的入口体验
+// 更好。Admin 在管理台显式开启（settings.search.messages_on=1）才放行
+// 前端展示。
+//
+// 注意：本 toggle 仅作前端展示信号；后端 /v1/messages/_search* endpoint
+// 不接此开关，行为不变。想从后端层面关闭搜索功能，由部署侧不部署 OS /
+// 不配置 OCTO_SEARCH_OS_ADDRS 实现。
 //
 // 与 SpaceDisableUserCreate 不同——本 helper **不**带 env fallback：DB 是
 // 单一真源。messages_search 是新功能，没有历史部署需要兼容；新增 env 入口
