@@ -229,6 +229,68 @@ func TestGetAppConfig_DisableUserCreateSpace_OnVersionShortCircuit(t *testing.T)
 	assert.Contains(t, w.Body.String(), `"disable_user_create_space":1`)
 }
 
+// appconfig 必须下发 messages_search_on：默认 0（缺 system_setting 行）。
+// messages_search 是新功能，默认关闭，admin 显式开启才放行 —— 与 default-true
+// 风格的 disable_user_create_space 相反，但同样由 system_setting + appconfig
+// 单一真源驱动。
+func TestGetAppConfig_MessagesSearchOn_DefaultsZero(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	cleanAllTablesAndReloadSettings(t, ctx)
+	err := f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"messages_search_on":0`)
+}
+
+// DB 写入 search.messages_on=1 时 appconfig 必须下发 1：admin 在管理台 toggle
+// 后客户端下次拉配置即可看到搜索入口出现，4 个 /v1/messages/_search* 也同步
+// 放行 —— 单一真源驱动客户端隐藏 + 服务端拒绝。
+func TestGetAppConfig_MessagesSearchOn_DBOverride(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	cleanAllTablesAndReloadSettings(t, ctx)
+	err := f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+
+	settings := EnsureSystemSettings(ctx)
+	assert.NoError(t, settings.db.upsert("search", "messages_on", "1", settingTypeBool, ""))
+	assert.NoError(t, settings.Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"messages_search_on":1`)
+}
+
+// version 短路分支同样要下发 messages_search_on：老客户端命中版本短路也必须
+// 看到当前开关，否则 admin toggle 后被本地 app_config 缓存住，与 LocalLoginOff /
+// DisableUserCreateSpace 同模式（system_setting 与 app_config.version 解耦）。
+func TestGetAppConfig_MessagesSearchOn_OnVersionShortCircuit(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	cleanAllTablesAndReloadSettings(t, ctx)
+	err := f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+
+	settings := EnsureSystemSettings(ctx)
+	assert.NoError(t, settings.db.upsert("search", "messages_on", "1", settingTypeBool, ""))
+	assert.NoError(t, settings.Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig?version=99999999", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"messages_search_on":1`)
+}
+
 // appconfig 必须下发 local_login_off：默认 0（缺 system_setting 行）。
 func TestGetAppConfig_LocalLoginOff_DefaultsZero(t *testing.T) {
 	s, ctx := testutil.NewTestServer()

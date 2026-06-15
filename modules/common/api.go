@@ -401,6 +401,7 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 			SystemBotUIDs:          spacepkg.SystemBotList(),
 			LocalLoginOff:          boolToFlag(cn.systemSettings.LocalLoginOff()),
 			DisableUserCreateSpace: boolToFlag(cn.systemSettings.SpaceDisableUserCreate()),
+			MessagesSearchOn:       boolToFlag(cn.systemSettings.MessagesSearchOn()),
 		})
 		return
 	}
@@ -439,6 +440,7 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		SystemBotUIDs:          spacepkg.SystemBotList(),
 		LocalLoginOff:          boolToFlag(cn.systemSettings.LocalLoginOff()),
 		DisableUserCreateSpace: boolToFlag(cn.systemSettings.SpaceDisableUserCreate()),
+		MessagesSearchOn:       boolToFlag(cn.systemSettings.MessagesSearchOn()),
 	})
 }
 
@@ -753,6 +755,15 @@ type appConfigResp struct {
 	// 实时性。后端 POST /v1/space/create 也走同一个 getter 校验,客户端隐藏
 	// 与服务端拒绝由单一真源驱动,不存在前后端漂移。
 	DisableUserCreateSpace int `json:"disable_user_create_space"`
+
+	// MessagesSearchOn 控制客户端是否显示消息搜索入口（聊天搜索按钮 / 全局
+	// 搜索 tab 等）。来源 system_setting search.messages_on，默认 0=关闭。
+	//
+	// 与 app_config.version 解耦：admin 在管理台 toggle 后老客户端命中 version
+	// 短路分支仍必须看到最新值，否则被本地缓存住。后端 4 个 /v1/messages/_search*
+	// 也走同一个 getter，客户端隐藏与服务端拒绝由单一真源驱动，与
+	// LocalLoginOff / DisableUserCreateSpace 同模式。
+	MessagesSearchOn int `json:"messages_search_on"`
 }
 
 type oidcProviderResp struct {
