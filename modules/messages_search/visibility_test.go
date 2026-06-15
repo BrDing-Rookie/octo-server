@@ -603,7 +603,7 @@ func TestFilterVisible_VisiblesWhitelist_NotInListDropped(t *testing.T) {
 
 // TestFilterVisible_VisiblesEmpty_FailOpen — Visibles is nil/empty (the
 // indexer hasn't written the field yet, or the message had no allowlist).
-// Per CONSTRAINTS-2026-06-12 §10 this is fail-open: the gate is skipped
+// Per CONSTRAINTS-2026-06-12 D24 this is fail-open: the gate is skipped
 // and the hit survives.
 func TestFilterVisible_VisiblesEmpty_FailOpen(t *testing.T) {
 	probe := &stubProbe{}
