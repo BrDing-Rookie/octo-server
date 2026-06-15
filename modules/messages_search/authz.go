@@ -46,7 +46,16 @@ func (h *Handler) checkChannelAccess(c *wkhttp.Context, channelType uint8, chann
 	case channelTypeThread:
 		return h.checkThreadAccess(c, channelID, loginUID)
 	default:
-		return true
+		// Unreachable in practice: validate.go rejects unknown channel
+		// types before this check runs. Kept fail-closed (defense in
+		// depth) so a future caller that bypasses validation can never
+		// inherit implicit access.
+		h.Warn("checkChannelAccess: unexpected channel_type",
+			zap.Uint8("channel_type", channelType),
+			zap.String("channel_id", channelID),
+			zap.String("uid", loginUID))
+		respondNotFound(c, "channel")
+		return false
 	}
 }
 
