@@ -149,7 +149,7 @@ type msgRef struct {
 // Expire mean "no gate" — same fail-open contract the read path has when
 // those fields are absent on a message. Until the indexer writes these
 // fields explicitly, legacy docs land here as if no gate were set; see
-// docs/messages-search/CONSTRAINTS-2026-06-12.md §10.
+// docs/messages-search/CONSTRAINTS-2026-06-12.md (D24).
 //
 // Fail-closed contract: any DB error returns (nil, err) and the caller MUST
 // surface INTERNAL_ERROR rather than fall through to the OS hits. This is
