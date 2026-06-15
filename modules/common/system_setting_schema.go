@@ -118,6 +118,13 @@ var systemSettingSchema = []settingDef{
 	{Category: "incomingwebhook", Key: "max_per_creator", Type: settingTypeInt, Description: "单个普通成员/机器人在一个群内最多可创建的 Webhook 数量（群主/管理员不受限）", Positive: true,
 		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.IncomingWebhookMaxPerCreator()) }},
 
+	// 消息搜索功能总开关 — 关闭后 4 个 /v1/messages/_search* endpoint 直接返回
+	// NOT_FOUND，appconfig 下发的 messages_search_on=0 让前端隐藏入口。
+	// 默认关闭：messages_search 模块依赖 OpenSearch + kafka indexer 联动，
+	// 环境就绪前先关闭避免给前端展示一个会 503 的入口。
+	{Category: "search", Key: "messages_on", Type: settingTypeBool, Description: "是否开启消息搜索功能（关闭后聊天搜索入口隐藏，所有搜索 API 返回 NOT_FOUND）",
+		Effective: func(s *SystemSettings) string { return boolToCanonical(s.MessagesSearchOn()) }},
+
 	// Email server config — formerly yaml-only (Support.* in config.go).
 	{Category: "support", Key: "email", Type: settingTypeString, Description: "技术支持邮箱（发件人）",
 		Effective: func(s *SystemSettings) string { return s.SupportEmail() }},

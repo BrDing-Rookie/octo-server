@@ -479,6 +479,51 @@ func TestSystemSettings_SpaceDisableUserCreate_EnvNegativeSpellings(t *testing.T
 	}
 }
 
+// MessagesSearchOn 默认必须 false：DB 缺行 / 空值 / 任意非 "1" 字面量 都
+// 视为关闭。这是 messages_search 模块的「上线安全姿态」—— 环境未就绪前
+// 客户端搜索入口隐藏 + 4 个 endpoint 返 NOT_FOUND，admin 显式 toggle 才放行。
+// 与 SpaceDisableUserCreate 不同：本 helper 不带 env fallback，DB 单一真源。
+func TestSystemSettings_MessagesSearchOn_DefaultsFalse(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+	assert.False(t, s.MessagesSearchOn(),
+		"DB 缺行时必须默认 false（messages_search 默认关闭，admin 显式开启）")
+}
+
+func TestSystemSettings_MessagesSearchOn_DBValueWins(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+
+	// "1" → 开启
+	require.NoError(t, s.db.upsert("search", "messages_on", "1", settingTypeBool, ""))
+	require.NoError(t, s.Reload())
+	assert.True(t, s.MessagesSearchOn(), "DB=1 → 开启")
+
+	// "0" → 显式关闭
+	require.NoError(t, s.db.upsert("search", "messages_on", "0", settingTypeBool, ""))
+	require.NoError(t, s.Reload())
+	assert.False(t, s.MessagesSearchOn(), "DB=0 → 关闭")
+
+	// "true" → 同 "1"（getBool 接受的字面量）
+	require.NoError(t, s.db.upsert("search", "messages_on", "true", settingTypeBool, ""))
+	require.NoError(t, s.Reload())
+	assert.True(t, s.MessagesSearchOn(), "DB=true → 开启")
+}
+
+// 任意未知字面量 → fallback false（与其他 bool 设置一致）。覆盖直接改 DB
+// 绕过 admin 写校验的边缘场景。
+func TestSystemSettings_MessagesSearchOn_UnknownLiteralFallsBackFalse(t *testing.T) {
+	for _, bad := range []string{"yes", "on", "TRUE", "T", "random", " 1 "} {
+		t.Run(bad, func(t *testing.T) {
+			s := &SystemSettings{}
+			snap := map[string]string{
+				"search.messages_on": bad,
+			}
+			s.snapshot.Store(&snap)
+			assert.Falsef(t, s.MessagesSearchOn(),
+				"未知字面量 %q 必须回退 false（DB 单一真源 + 默认关闭）", bad)
+		})
+	}
+}
+
 func TestSystemSettings_StringFallsBackOnEmpty(t *testing.T) {
 	s := newTestSystemSettings(t, nil)
 	s.ctx.GetConfig().Support.EmailSmtp = "smtp.yaml.example:465"

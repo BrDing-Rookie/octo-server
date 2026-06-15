@@ -508,6 +508,21 @@ func parseSpaceDisableUserCreateEnv(v string) bool {
 	return false
 }
 
+// MessagesSearchOn 返回消息搜索功能是否开启。
+//
+// DB 缺行 / 显式 false / 任意非 "1" 字面量 → false（功能关闭，前端隐藏入口、
+// 4 个 /v1/messages/_search* endpoint 直接 NOT_FOUND）。这是默认安全姿态：
+// messages_search 依赖 OpenSearch + kafka indexer 联动，环境未就绪时返回
+// 一个 200 但 503 的搜索入口对用户体验更差。Admin 在管理台显式开启
+// （settings.search.messages_on=1）才放行。
+//
+// 与 SpaceDisableUserCreate 不同——本 helper **不**带 env fallback：DB 是
+// 单一真源。messages_search 是新功能，没有历史部署需要兼容；新增 env 入口
+// 反而会让"为什么我配了 env 没生效"成为新的支持负担。
+func (s *SystemSettings) MessagesSearchOn() bool {
+	return s.getBool("search", "messages_on", false)
+}
+
 // ----- sidebar recent-tab activity filter (issue #289) -----
 
 // SidebarRecentFilterGroupDays returns the recent-tab activity window for group
