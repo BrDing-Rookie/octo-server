@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/message"
 	"github.com/olivere/elastic"
@@ -116,27 +117,46 @@ func (p *messageVisibilityProbe) ChannelOffset(uid, channelID string) (uint32, e
 // is reserved for future cross-channel callers (e.g. when the indexer fans
 // out into multiple OS docs); for /v1/messages/_search* it is the request's
 // channel_id (single channel per request).
+//
+// Visibles / Expire / Timestamp carry the per-message allowlist + TTL the
+// authoritative read path consults (modules/message/api.go::MsgSyncResp.from).
+// Empty Visibles / zero Expire mean "no gate" — same fail-open semantics
+// the read path has when those fields are absent. While the indexer has
+// not yet been updated to write these fields the gates will stay fail-open
+// for legacy docs; see docs/messages-search/CONSTRAINTS-2026-06-12.md.
 type msgRef struct {
 	MessageID  string // canonical decimal-string id (matches message_extra.message_id)
 	MessageSeq uint32 // matches channel_offset.message_seq
 	ChannelID  string
+	Visibles   []string // sender-set allowlist; non-empty => caller must be in it
+	Expire     uint32   // TTL seconds; 0 means no expiry gate
+	Timestamp  int64    // message send time (unix seconds), paired with Expire
 }
 
 // filterVisible is the search-side analogue of message.filterMessages. It
-// rejects hits the caller must NOT see based on the same four signals the
+// rejects hits the caller must NOT see based on the same six signals the
 // /messages and /channel_files read paths consult:
 //
 //  1. message_extra.revoke=1                     (sender-revoked)
 //  2. message_extra.is_deleted=1                 (admin / mutual-deleted)
 //  3. message_user_extra.message_is_deleted=1    (current user deleted)
 //  4. channel_offset.message_seq >= hit.seq      (current user cleared chat)
+//  5. payload.visibles whitelist                 (loginUID not in allowlist)
+//  6. payload.expire TTL                         (now - expire >= timestamp)
+//
+// 1–4 are MySQL-resident (probe roundtrips); 5–6 are read directly off the
+// OS hit (msgRef.Visibles / Expire / Timestamp). Empty Visibles or zero
+// Expire mean "no gate" — same fail-open contract the read path has when
+// those fields are absent on a message. Until the indexer writes these
+// fields explicitly, legacy docs land here as if no gate were set; see
+// docs/messages-search/CONSTRAINTS-2026-06-12.md §10.
 //
 // Fail-closed contract: any DB error returns (nil, err) and the caller MUST
 // surface INTERNAL_ERROR rather than fall through to the OS hits. This is
-// load-bearing — the four signals are the reason the read path keeps a
+// load-bearing — the four DB signals are the reason the read path keeps a
 // MySQL round-trip on the hot path; OS only sees a stale `revoked` field
-// (and nothing else), so post-filter is the only place these four are
-// applied for search.
+// (and nothing else), so post-filter is the only place these are applied
+// for search.
 //
 // Empty refs is a no-op (no DB calls). Duplicate MessageIDs collapse so the
 // IN list stays bounded by unique ids on the page.
@@ -176,6 +196,7 @@ func (h *Handler) filterVisible(ctx context.Context, loginUID, channelID string,
 		return nil, fmt.Errorf("filterVisible: ChannelOffset: %w", err)
 	}
 
+	nowUnix := time.Now().Unix()
 	keep := make(map[string]struct{}, len(refs))
 	for _, r := range refs {
 		if r.MessageID == "" {
@@ -191,6 +212,24 @@ func (h *Handler) filterVisible(ctx context.Context, loginUID, channelID string,
 			continue
 		}
 		if offsetSeq > 0 && r.MessageSeq <= offsetSeq {
+			continue
+		}
+		if len(r.Visibles) > 0 {
+			inList := false
+			for _, uid := range r.Visibles {
+				if uid == loginUID {
+					inList = true
+					break
+				}
+			}
+			if !inList {
+				continue
+			}
+		}
+		// Mirrors modules/message/api.go::MsgSyncResp.from expire branch:
+		// hidden once now - expire >= timestamp. Both Expire and Timestamp
+		// must be non-zero to evaluate the gate; either missing is fail-open.
+		if r.Expire > 0 && r.Timestamp > 0 && nowUnix-int64(r.Expire) >= r.Timestamp {
 			continue
 		}
 		keep[r.MessageID] = struct{}{}
@@ -383,6 +422,9 @@ func projectDocRef(reqChannelID string) projectFn {
 			MessageID:  strconv.FormatInt(d.MessageID, 10),
 			MessageSeq: uint32(d.MessageSeq),
 			ChannelID:  reqChannelID,
+			Visibles:   d.Visibles,
+			Expire:     d.Expire,
+			Timestamp:  d.Timestamp,
 		}, true
 	}
 }

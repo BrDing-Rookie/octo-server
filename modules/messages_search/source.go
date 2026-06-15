@@ -21,6 +21,19 @@ type Doc struct {
 	// fail-closed by the term filter in applySpaceIDScope (no match → no
 	// hit) rather than implicitly visible.
 	SpaceID string `json:"spaceId,omitempty"`
+	// Visibles is the per-message allowlist a sender may attach to a group
+	// message so only the listed UIDs see it (mirrors the read-path gate
+	// in modules/message/api.go::MsgSyncResp.from at the visibles-array
+	// branch). When non-empty and the caller's UID is absent the search
+	// post-filter must drop the hit. Schema is reserved here ahead of the
+	// indexer write — see CONSTRAINTS-2026-06-12 for the transient
+	// fail-open while the field is unwritten.
+	Visibles []string `json:"visibles,omitempty"`
+	// Expire is the TTL in seconds attached to ephemeral messages. The read
+	// path hides the message once `time.Now().Unix() - Expire >= Timestamp`
+	// (modules/message/api.go around the expire branch). Search mirrors the
+	// same predicate post-filter so expired content cannot leak via search.
+	Expire uint32 `json:"expire,omitempty"`
 }
 
 // Payload is the structured projection of the message payload. Each typed
