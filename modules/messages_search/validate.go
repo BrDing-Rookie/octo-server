@@ -25,13 +25,14 @@ type SearchFilters struct {
 
 // SearchMessagesReq is the request body for POST /v1/messages/_search.
 //
-// `Keyword` is required and non-empty per A doc §2.1. `Sort` accepts
-// time_desc (default) | time_asc | relevance. `PageSize` is normalised into
-// [1, 100] with a default of 20.
+// `Keyword` is optional; when empty the DSL drops the multi_match clause and
+// the endpoint behaves as a time-ordered listing. `Sort` accepts time_desc
+// (default) | time_asc | relevance — relevance requires a non-empty keyword.
+// `PageSize` is normalised into [1, 100] with a default of 20.
 type SearchMessagesReq struct {
 	ChannelType uint8         `json:"channel_type"`
 	ChannelID   string        `json:"channel_id"`
-	Keyword     string        `json:"keyword"`
+	Keyword     string        `json:"keyword,omitempty"`
 	Filters     SearchFilters `json:"filters,omitempty"`
 	Sort        string        `json:"sort,omitempty"`
 	PageSize    int           `json:"page_size,omitempty"`
@@ -65,7 +66,7 @@ type SearchFilesReq struct {
 }
 
 // SearchAllReq is the request body for POST /v1/messages/_search_all. Same
-// shape as _search; keyword required.
+// shape as _search; keyword optional and gated identically.
 type SearchAllReq = SearchMessagesReq
 
 // SearchAroundReq is the request body for POST /v1/messages/_search_around.
@@ -161,23 +162,6 @@ func validateBase(c *wkhttp.Context, cfg SearchConfig, channelType uint8, channe
 		page = defaultPage
 	}
 	return page, true
-}
-
-// validateKeywordRequired runs the keyword length / non-empty check.
-func validateKeywordRequired(c *wkhttp.Context, keyword string) bool {
-	if keyword == "" {
-		respondValidation(c, "keyword", "required")
-		return false
-	}
-	if utf8.RuneCountInString(keyword) > maxKeywordLen {
-		respondValidationDetails(c, i18n.Details{
-			"field":      "keyword",
-			"reason":     "too long",
-			"max_length": maxKeywordLen,
-		})
-		return false
-	}
-	return true
 }
 
 // validateKeywordOptional accepts an empty keyword but still bounds length.

@@ -104,3 +104,28 @@ func TestValidateBase_MalformedCursorRejected(t *testing.T) {
 		t.Fatalf("cursor rejection must render a validation envelope, got %q", rec.Body.String())
 	}
 }
+
+// sort=relevance with allowRelevance=false (the empty-keyword path) must be
+// refused — relevance has no _score to sort on when the multi_match clause is
+// dropped. The user-facing body is rendered through i18n templates so the
+// raw reason string is not asserted here (other validate tests follow the
+// same envelope-only pattern); the rejection itself is the contract.
+func TestValidateBase_RelevanceRequiresKeyword(t *testing.T) {
+	c, rec := newValidateCtx(t)
+	_, ok := validateBase(c, SearchConfig{}, channelTypeGroup, "G1", "relevance", "",
+		SearchFilters{}, 20, false)
+	if ok {
+		t.Fatalf("sort=relevance without keyword (allowRelevance=false) must be rejected")
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("rejection must render a VALIDATION_ERROR envelope")
+	}
+
+	// And the symmetric positive: with allowRelevance=true (keyword present)
+	// the same sort value passes — guards against regressing the gate.
+	c2, _ := newValidateCtx(t)
+	if _, ok := validateBase(c2, SearchConfig{}, channelTypeGroup, "G1", "relevance", "",
+		SearchFilters{}, 20, true); !ok {
+		t.Fatalf("sort=relevance with allowRelevance=true must be accepted")
+	}
+}
