@@ -193,6 +193,72 @@ func TestBuildSearchMessagesDSL_FiltersSystemMessages(t *testing.T) {
 	}
 }
 
+// TestApplySystemMessageHardFilter pins the shared helper that both
+// /_search_messages and /_search_around use to satisfy the indexer §2.4
+// "搜索硬过滤" contract. Empty bool query in, two must_not clauses out:
+// term(payload.type=99) and range(payload.type ∈ [1000, 2000]).
+func TestApplySystemMessageHardFilter(t *testing.T) {
+	b := elastic.NewBoolQuery()
+	applySystemMessageHardFilter(b)
+
+	src, err := b.Source()
+	if err != nil {
+		t.Fatalf("Source(): %v", err)
+	}
+	raw, _ := json.Marshal(src)
+	var normalized map[string]any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	boolNode, ok := normalized["bool"].(map[string]any)
+	if !ok {
+		t.Fatalf("query has no bool node: %s", raw)
+	}
+	rawMN, ok := boolNode["must_not"]
+	if !ok {
+		t.Fatalf("bool has no must_not: %s", raw)
+	}
+	var mustNot []any
+	switch v := rawMN.(type) {
+	case []any:
+		mustNot = v
+	case map[string]any:
+		mustNot = []any{v}
+	default:
+		t.Fatalf("must_not has unexpected shape %T: %s", rawMN, raw)
+	}
+
+	var seenCmd, seenRange bool
+	for _, clause := range mustNot {
+		m, ok := clause.(map[string]any)
+		if !ok {
+			continue
+		}
+		if term, ok := m["term"].(map[string]any); ok {
+			if pt, ok := term["payload.type"].(float64); ok && int(pt) == payloadTypeCmd {
+				seenCmd = true
+			}
+		}
+		if rng, ok := m["range"].(map[string]any); ok {
+			if pt, ok := rng["payload.type"].(map[string]any); ok {
+				lo, loOK := pt["from"].(float64)
+				hi, hiOK := pt["to"].(float64)
+				incLo, _ := pt["include_lower"].(bool)
+				incHi, _ := pt["include_upper"].(bool)
+				if loOK && hiOK && int(lo) == payloadTypeSystemMin && int(hi) == payloadTypeSystemMax && incLo && incHi {
+					seenRange = true
+				}
+			}
+		}
+	}
+	if !seenCmd {
+		t.Errorf("must_not missing term payload.type=%d in:\n%s", payloadTypeCmd, raw)
+	}
+	if !seenRange {
+		t.Errorf("must_not missing range payload.type [%d,%d] in:\n%s", payloadTypeSystemMin, payloadTypeSystemMax, raw)
+	}
+}
+
 func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 	req := SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"}
 	q := buildSearchMediaDSL(req, "g", "")
