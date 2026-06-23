@@ -157,6 +157,7 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)
 	b.MustNot(elastic.NewTermQuery("payload.type", payloadTypeCmd))
+	b.MustNot(elastic.NewRangeQuery("payload.type").Gte(payloadTypeSystemMin).Lte(payloadTypeSystemMax))
 	return b, analyzeErr
 }
 
