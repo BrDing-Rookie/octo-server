@@ -1,6 +1,8 @@
 package incomingwebhook
 
 import (
+	"encoding/json"
+
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/gocraft/dbr/v2"
 )
@@ -28,8 +30,16 @@ type incomingWebhookModel struct {
 	Avatar     string
 	CreatorUID string
 	Status     int
-	LastUsedAt dbr.NullTime
-	CallCount  int64
+	// AllowMentionAll / AllowMentionBots 是【广播型 @】的 per-webhook 能力位
+	// （0=否[默认] / 1=是）：分别授权该 webhook 推送 @所有人(真人广播,→mention.humans)
+	// 与 @所有 AI(bot 广播,→mention.ais)。广播会刷全群红点 / 唤起全部 bot，是高噪声能力，
+	// 故默认关闭、需显式打开；由 webhook 的合法成员（创建者，或群管理员）在 create/update
+	// 时开关——与「成员可自建/自管 webhook」一致，能力位本身即该广播能力的唯一闸。
+	// 定向 @uid（指定一个/多个成员）不受这两个开关约束，但受「群成员闸 + 去重 + 上限」。
+	AllowMentionAll  int
+	AllowMentionBots int
+	LastUsedAt       dbr.NullTime
+	CallCount        int64
 	db.BaseModel
 }
 
@@ -87,6 +97,44 @@ type pushPayloadReq struct {
 	Username  string                 `json:"username,omitempty"`
 	AvatarURL string                 `json:"avatar_url,omitempty"`
 	Extra     map[string]interface{} `json:"extra,omitempty"`
+	// Mention 让调用方 @ 群成员（用户/bot 同一 UID 命名空间，一个或多个）并可选广播。
+	// 仅 native 端点解析（pushAdapter.allowMention），适配器(企业微信/飞书/GitHub…)不支持。
+	// 服务端把它翻译成消息 payload 的 mention 子对象（buildMention），定向 uids 经群成员闸
+	// 过滤、广播位经 per-webhook 能力位放行；其余 mention 语义（红点/唤起 bot）全由下游
+	// 既有 message 监听器完成。绝不透传到 payload，与 Extra 被丢弃同源（见 buildPayload）。
+	//
+	// 类型刻意是 json.RawMessage 而非 *mentionReq：mention 是【可选】字段，其形状非法
+	// （如 uids 传成字符串）不能把整条推送 400 掉——否则相邻的合法 content 也被连累丢弃，
+	// 违反 acceptance #6「malformed mention.uids → no panic, no mention key, 消息照投」。
+	// 故此处只做惰性捕获，真正的宽松解码在 buildMention/decodeMention：解码失败即降级为
+	// 「无 mention」、消息照常投递。
+	Mention json.RawMessage `json:"mention,omitempty"`
+}
+
+// mentionReq 是 native 推送请求里的 @ 描述（对外契约）。两个广播位刻意不暴露内部线协议的
+// humans/ais 字段名：调用方只写「@所有人(all) / @所有 AI(bots)」，由服务端 buildMention 翻译
+// 为 mention.{humans,ais} 并做能力位校验。Entities 则【直接以线协议字段名 entities 接收】——
+// 它是渲染层 [{uid,offset,length}]，本就是端上要消费的形态、无可翻译语义，服务端只做成员闸 +
+// 越界/锚点校验后原样透传（见 Entities 字段注释）。
+//   - Uids     ：要 @ 的成员 UID（用户或 bot），去重后受上限约束，且必须是本群当前成员。
+//   - All      ：@所有人（真人广播），受 webhook 的 allow_mention_all 能力位约束。
+//   - Bots     ：@所有 AI（bot 广播），受 webhook 的 allow_mention_bots 能力位约束。
+//   - Entities ：渲染层 @ 区间（详见字段注释）；定向渲染、不受广播能力位约束。
+type mentionReq struct {
+	Uids []string `json:"uids,omitempty"`
+	All  bool     `json:"all,omitempty"`
+	Bots bool     `json:"bots,omitempty"`
+	// Entities 是【渲染层】的 @ 区间（线协议 mention.entities：[{uid,offset,length}]），
+	// 与 uids（路由层）正交：调用方自带 content 文本与每个 @ 的 offset/length，服务端只校验
+	// 每条 entity 的 uid 是本群成员、offset/length 落在 content 的 UTF-16 码元范围内且 offset
+	// 处确为 '@'，合法者原样透传到线协议供端上权威渲染气泡（web 用 entities 精确绑定、Android
+	// 校验后保留、iOS 忽略改按位置解析）。offset/length 单位是 UTF-16 码元（= JS .length /
+	// Java/Kotlin String / NSString），不是字节、也不是 rune。
+	//
+	// 类型是 []json.RawMessage 以做【逐条】宽松解码：单条形状非法（如 offset 传字符串）只丢
+	// 该条，不连累其余 entity，也不影响 mention 的 uids/all/bots——与 decodeMention 的宽松
+	// 契约（malformed → 降级、不 400、不丢消息）一致。
+	Entities []json.RawMessage `json:"entities,omitempty"`
 }
 
 // webhookBlock 是富文本消息的单个有序块（对外契约）。字段刻意与 octo-lib
@@ -106,16 +154,22 @@ type webhookBlock struct {
 }
 
 // createReq 管理端创建 webhook 的请求体。
+// AllowMention* 为广播能力位，任意合法成员均可设置；缺省/false 即默认关闭。
 type createReq struct {
-	Name   string `json:"name"`
-	Avatar string `json:"avatar,omitempty"`
+	Name             string `json:"name"`
+	Avatar           string `json:"avatar,omitempty"`
+	AllowMentionAll  *bool  `json:"allow_mention_all,omitempty"`
+	AllowMentionBots *bool  `json:"allow_mention_bots,omitempty"`
 }
 
 // updateReq 修改 webhook 的请求体。零值字段不更新。
+// AllowMention* 由 webhook 的合法成员（创建者/管理员）可改。
 type updateReq struct {
-	Name   *string `json:"name,omitempty"`
-	Avatar *string `json:"avatar,omitempty"`
-	Status *int    `json:"status,omitempty"`
+	Name             *string `json:"name,omitempty"`
+	Avatar           *string `json:"avatar,omitempty"`
+	Status           *int    `json:"status,omitempty"`
+	AllowMentionAll  *bool   `json:"allow_mention_all,omitempty"`
+	AllowMentionBots *bool   `json:"allow_mention_bots,omitempty"`
 }
 
 // webhookResp 对外暴露的 webhook 元信息（不含 token / token_hash）。
@@ -127,9 +181,12 @@ type webhookResp struct {
 	Avatar     string `json:"avatar"`
 	CreatorUID string `json:"creator_uid"`
 	Status     int    `json:"status"`
-	LastUsedAt int64  `json:"last_used_at"`
-	CallCount  int64  `json:"call_count"`
-	CreatedAt  int64  `json:"created_at"`
+	// AllowMentionAll / AllowMentionBots 回显广播能力位（0/1），便于管理端 UI 渲染开关。
+	AllowMentionAll  int   `json:"allow_mention_all"`
+	AllowMentionBots int   `json:"allow_mention_bots"`
+	LastUsedAt       int64 `json:"last_used_at"`
+	CallCount        int64 `json:"call_count"`
+	CreatedAt        int64 `json:"created_at"`
 }
 
 // createResp 创建/重置返回；token 仅此一次出现。
