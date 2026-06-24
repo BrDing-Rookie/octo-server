@@ -377,7 +377,7 @@ func (h *Handler) paginateWithFilterDepth(
 	nextCursor := ""
 	if hasMore {
 		ts, _, score := extractSortValues(anchorHit.Sort, isRelevanceSort)
-		msgID := lastHitMessageID(anchorHit)
+		msgID, subSeq := lastHitMessageIDAndSubSeq(anchorHit)
 		if ts == 0 || msgID == 0 {
 			// Spec v4.2 §1.4 requires a non-empty cursor when has_more=true;
 			// rather than break the contract, drop has_more so paging stops
@@ -387,7 +387,7 @@ func (h *Handler) paginateWithFilterDepth(
 			// Carry the cumulative depth so the next request's cap check sees
 			// the running total, independent of the page_size used to get here.
 			nextDepth := priorDepth + int64(len(collected))
-			nextCursor = encodeCursorWithDepth(h.cfg, ts, msgID, score, nextDepth)
+			nextCursor = encodeCursorWithDepth(h.cfg, ts, msgID, score, subSeq, nextDepth)
 		}
 	}
 	return collected, hasMore, nextCursor, nil
@@ -420,7 +420,7 @@ func (h *Handler) paginateWithFilterDepth(
 func (h *Handler) resolveCursorDepth(c *wkhttp.Context, cursor string, pageSize int) (int64, bool) {
 	var depth int64
 	if cursor != "" {
-		_, _, _, d, err := decodeCursorWithDepth(h.cfg, cursor)
+		_, _, _, d, _, err := decodeCursorWithDepth(h.cfg, cursor)
 		if err != nil {
 			// Mirrors decodeCursorAsSearchAfter's contract: malformed cursors
 			// map to VALIDATION_ERROR(field=cursor) upstream. Callers already
@@ -446,11 +446,17 @@ func (h *Handler) resolveCursorDepth(c *wkhttp.Context, cursor string, pageSize 
 // On structural / signature failure, returns (nil, false) so the handler
 // can map to VALIDATION_ERROR(field=cursor) — same surface as the legacy
 // per-handler decode path that this consolidates.
+//
+// The trailing subSeq element (Part B virtual-doc tiebreaker) is appended
+// for both sort modes — pre-Part-B cursors decode to subSeq=0 and the
+// emitted tuple is search_after-exclusive, so legacy cursors keep working
+// (they just resume one tiebreaker step earlier and pick up any
+// same-(ts,msgID) virtual children on the next page).
 func decodeCursorAsSearchAfter(cfg SearchConfig, cursor string, isRelevanceSort bool) ([]any, bool) {
 	if cursor == "" {
 		return nil, true
 	}
-	ts, msgID, score, err := decodeCursor(cfg, cursor)
+	ts, msgID, score, subSeq, err := decodeCursor(cfg, cursor)
 	if err != nil {
 		return nil, false
 	}
@@ -458,9 +464,9 @@ func decodeCursorAsSearchAfter(cfg SearchConfig, cursor string, isRelevanceSort 
 		if score == nil {
 			return nil, false // stale cursor format
 		}
-		return []any{ts, *score, msgID}, true
+		return []any{ts, *score, msgID, subSeq}, true
 	}
-	return []any{ts, msgID}, true
+	return []any{ts, msgID, subSeq}, true
 }
 
 // projectDocRef returns a projectFn that pulls (messageId, messageSeq) from
@@ -482,8 +488,27 @@ func projectDocRef(reqChannelID string) projectFn {
 		if d.MessageID == 0 {
 			return msgRef{}, false
 		}
+		// Visibility key is the parent messageId for virtual sub-documents
+		// (Part B rich-text derivatives, see richtext-virtual-docs-octo-server-dev.md
+		// §1 / §4). Revoke / delete / channel-offset / visibles state lives on
+		// the parent's row in MySQL; the child has no row of its own. coalesce
+		// covers both cases: plain docs (Virtual=false, ParentMessageID=nil)
+		// keep the existing behaviour; virtual sub-docs route to the parent's
+		// id. Per indexer contract MessageID itself is also the parent's value
+		// on virtual sub-docs, so the coalesce is a safety belt — if indexer
+		// ever lets these diverge (e.g. swaps to a composite child id) the
+		// reader still routes visibility correctly.
+		//
+		// Note: msgRef.MessageID is the visibility-query key, NOT the wire
+		// `message_id` on the response (response projection is buildXxxHits,
+		// which transparently passes through doc.messageId per Part B's
+		// "zero front-end change" contract).
+		visKey := d.MessageID
+		if d.Virtual && d.ParentMessageID != nil && *d.ParentMessageID != 0 {
+			visKey = *d.ParentMessageID
+		}
 		return msgRef{
-			MessageID:  strconv.FormatInt(d.MessageID, 10),
+			MessageID:  strconv.FormatInt(visKey, 10),
 			MessageSeq: uint32(d.MessageSeq),
 			ChannelID:  reqChannelID,
 			Visibles:   d.Visibles,

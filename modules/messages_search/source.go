@@ -23,6 +23,35 @@ type Doc struct {
 	// fail-closed by the term filter in applySpaceIDScope (no match → no
 	// hit) rather than implicitly visible.
 	SpaceID string `json:"spaceId,omitempty"`
+	// ParentMessageID and Virtual mark rich-text-derived sub-documents that
+	// the indexer emits per embedded image/file inside a payload.type=14
+	// rich-text message (Part B virtual-docs contract, see
+	// docs/messages-search/richtext-virtual-docs-octo-server-dev.md §1).
+	//
+	// Both fields are reader-internal — they never reach the JSON response.
+	// `Virtual=true` drives the `must_not(virtual=true)` filter on the four
+	// text-search builders so derivative children don't masquerade as
+	// independent messages on _search / _search_all / _search_around.
+	// `ParentMessageID` is the visibility key used by filterVisible: revoke /
+	// delete / channel-offset / visibles state is owned by the parent rich-text
+	// row in MySQL and the child has no row of its own.
+	//
+	// *int64 distinguishes "field absent" (legacy / non-virtual docs) from a
+	// zero parent id. Per indexer contract `Virtual=true` ⇒ `ParentMessageID`
+	// non-nil and equal to the parent's messageId. Plain docs (Virtual=false)
+	// leave ParentMessageID nil and keep the existing behaviour.
+	ParentMessageID *int64 `json:"parentMessageId,omitempty"`
+	Virtual         bool   `json:"virtual,omitempty"`
+	// SubSeq is the sort-tiebreaker for virtual sub-documents derived from
+	// rich-text parents (Part B). Per indexer contract:
+	//   - plain message docs and rich-text parent docs (Virtual=false): SubSeq=0
+	//   - virtual sub-documents (Virtual=true):                          SubSeq>=1
+	// Together with (timestamp, messageId) this guarantees a globally unique
+	// sort tuple so OpenSearch search_after never silently skips siblings
+	// that share (timestamp, messageId) with their parent. Storage docs that
+	// pre-date the field deserialize to 0, which matches the plain/parent
+	// convention — safe to ship before the indexer field exists.
+	SubSeq int `json:"subSeq,omitempty"`
 	// Visibles is the per-message allowlist a sender may attach to a group
 	// message so only the listed UIDs see it (mirrors the read-path gate
 	// in modules/message/api.go::MsgSyncResp.from at the visibles-array

@@ -244,6 +244,72 @@ func TestUnmarshalDoc_RichText(t *testing.T) {
 	}
 }
 
+// TestUnmarshalDoc_VirtualSubDoc covers the Part B virtual sub-document shape
+// (richtext-virtual-docs-octo-server-dev.md §1): a rich-text-derived child
+// carrying `virtual=true` + `parentMessageId` alongside the usual image/file
+// payload. Both fields are reader-internal — they drive the must_not filter
+// and the visibility coalesce, never the JSON response.
+func TestUnmarshalDoc_VirtualSubDoc(t *testing.T) {
+	src := `{
+	  "messageId": 7777,
+	  "messageSeq": 99,
+	  "channelId": "g",
+	  "timestamp": 1717000000,
+	  "virtual": true,
+	  "parentMessageId": 7777,
+	  "payload": {"type": 2, "image": {"url": "http://x", "caption": "合同图片"}}
+	}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !doc.Virtual {
+		t.Fatalf("Virtual: want true, got false")
+	}
+	if doc.ParentMessageID == nil {
+		t.Fatalf("ParentMessageID: want non-nil pointer")
+	}
+	if *doc.ParentMessageID != 7777 {
+		t.Fatalf("ParentMessageID: got %d, want 7777", *doc.ParentMessageID)
+	}
+}
+
+// TestUnmarshalDoc_PlainDocOmitsVirtual: a legacy / non-virtual doc must
+// deserialise to Virtual=false and ParentMessageID=nil so the visibility
+// coalesce keeps the existing behaviour (visKey = own messageId) and the
+// text-search must_not filter still admits it.
+func TestUnmarshalDoc_PlainDocOmitsVirtual(t *testing.T) {
+	src := `{"messageId":1,"messageSeq":1,"channelId":"g","timestamp":100,"payload":{"type":1,"text":{"content":"hi"}}}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Virtual {
+		t.Fatalf("Virtual must default to false on plain doc")
+	}
+	if doc.ParentMessageID != nil {
+		t.Fatalf("ParentMessageID must be nil on plain doc; got %v", *doc.ParentMessageID)
+	}
+}
+
+// TestMarshalDoc_PlainDocOmitsNewFieldsOnWire: a plain Doc (Virtual=false,
+// ParentMessageID=nil) must marshal byte-identical to its pre-Part-B form —
+// the new fields are tagged `omitempty` so neither key surfaces. Guards
+// against accidentally widening the OS-facing JSON contract.
+func TestMarshalDoc_PlainDocOmitsNewFieldsOnWire(t *testing.T) {
+	d := Doc{MessageID: 1, MessageSeq: 1, ChannelID: "g", Timestamp: 100}
+	out, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(out)
+	for _, k := range []string{`"virtual"`, `"parentMessageId"`} {
+		if strings.Contains(wire, k) {
+			t.Errorf("plain-doc wire form must omit %s; got %s", k, wire)
+		}
+	}
+}
+
 func TestClassifyKind_Forward(t *testing.T) {
 	p := &Payload{MergeForward: &MergeForwardPayload{ChildCount: 3}}
 	if got := classifyKind(p); got != "forward" {

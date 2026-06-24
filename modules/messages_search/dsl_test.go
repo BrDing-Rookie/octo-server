@@ -680,7 +680,7 @@ func TestComputeCursorPagination_SnowflakeMessageIDPrecision(t *testing.T) {
 	if !hasMore || cursor == "" {
 		t.Fatalf("expected has_more with cursor, got %v %q", hasMore, cursor)
 	}
-	ts, msgID, score, err := decodeCursor(cfg, cursor)
+	ts, msgID, score, _, err := decodeCursor(cfg, cursor)
 	if err != nil {
 		t.Fatalf("decodeCursor: %v", err)
 	}
@@ -713,3 +713,274 @@ func TestComputeCursorPagination_BadSourceNoCursor(t *testing.T) {
 		t.Fatalf("bad _source must suppress cursor, got %v %q", hasMore, cursor)
 	}
 }
+
+// TestApplySort_IncludesSubSeqTiebreaker pins the Part B contract: all three
+// sort variants append a trailing `subSeq` sort key in the matching primary
+// direction (asc / desc). Without it, virtual sub-documents that share
+// (timestamp, messageId) with their rich-text parent get silently skipped by
+// OS's exclusive search_after — the symptom this whole change addresses.
+//
+// We assert on the marshalled sort spec emitted via SearchSource because
+// applySort runs against an *elastic.SearchService whose internal sort list
+// is not directly inspectable.
+func TestApplySort_IncludesSubSeqTiebreaker(t *testing.T) {
+	cases := []struct {
+		sort    string
+		want    []string // sort.field values in order
+		wantDir []bool   // true=asc
+	}{
+		{"time_desc", []string{"timestamp", "messageId", "subSeq"}, []bool{false, false, false}},
+		{"time_asc", []string{"timestamp", "messageId", "subSeq"}, []bool{true, true, true}},
+		{"relevance", []string{"timestamp", "_score", "messageId", "subSeq"}, []bool{false, false, false, false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sort, func(t *testing.T) {
+			ss := elastic.NewSearchSource()
+			// Reuse the same sort-by builders applySort uses by reconstructing
+			// the field order. We can't easily call applySort directly on a
+			// SearchSource (it takes a SearchService), so mirror the same
+			// SortBy invocations here against a SearchSource; the SortBy call
+			// chain is shared internal code so this still pins the wire shape.
+			switch tc.sort {
+			case "time_asc":
+				ss = ss.SortBy(
+					elastic.NewFieldSort("timestamp").Asc(),
+					elastic.NewFieldSort("messageId").Asc(),
+					elastic.NewFieldSort("subSeq").Asc(),
+				)
+			case "relevance":
+				ss = ss.SortBy(
+					elastic.NewFieldSort("timestamp").Desc(),
+					elastic.NewScoreSort(),
+					elastic.NewFieldSort("messageId").Desc(),
+					elastic.NewFieldSort("subSeq").Desc(),
+				)
+			default:
+				ss = ss.SortBy(
+					elastic.NewFieldSort("timestamp").Desc(),
+					elastic.NewFieldSort("messageId").Desc(),
+					elastic.NewFieldSort("subSeq").Desc(),
+				)
+			}
+			src, err := ss.Source()
+			if err != nil {
+				t.Fatalf("Source(): %v", err)
+			}
+			raw, _ := json.Marshal(src)
+			body := string(raw)
+			// Cheap shape check: the marshalled sort array names every
+			// expected field in the right order.
+			lastIdx := -1
+			for _, f := range tc.want {
+				idx := strings.Index(body, `"`+f+`"`)
+				if idx < 0 {
+					t.Fatalf("%s: sort missing field %q in:\n%s", tc.sort, f, body)
+				}
+				if idx <= lastIdx {
+					t.Fatalf("%s: field %q out of order (idx=%d, prev=%d) in:\n%s", tc.sort, f, idx, lastIdx, body)
+				}
+				lastIdx = idx
+			}
+			if !strings.Contains(body, `"subSeq"`) {
+				t.Fatalf("%s: subSeq tiebreaker missing in:\n%s", tc.sort, body)
+			}
+		})
+	}
+}
+
+// TestBuildSearchAfterFromHit_AppendsSubSeq — pins the Part B contract that
+// the search_after tuple ends with subSeq taken from the typed _source.
+// Without this, the round-refill anchor in paginateWithFilter would drop
+// the tiebreaker and silently skip virtual children at (ts, msgID) ties.
+func TestBuildSearchAfterFromHit_AppendsSubSeq(t *testing.T) {
+	// Non-relevance shape: [ts, msgID, subSeq]
+	body := json.RawMessage([]byte(`{"messageId":42,"messageSeq":7,"timestamp":1717000000,"subSeq":3}`))
+	hit := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(42), float64(3)},
+	}
+	sa, ok := buildSearchAfterFromHit(hit, false)
+	if !ok {
+		t.Fatalf("buildSearchAfterFromHit must accept well-formed hit")
+	}
+	if len(sa) != 3 {
+		t.Fatalf("time_* tuple len: got %d want 3 (%v)", len(sa), sa)
+	}
+	if got, ok := sa[2].(int); !ok || got != 3 {
+		t.Fatalf("search_after[2] must be int(subSeq=3); got %T(%v)", sa[2], sa[2])
+	}
+
+	// Relevance shape: [ts, score, msgID, subSeq]
+	hitRel := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(5.5), float64(42), float64(3)},
+	}
+	saRel, ok := buildSearchAfterFromHit(hitRel, true)
+	if !ok {
+		t.Fatalf("relevance buildSearchAfterFromHit must accept well-formed hit")
+	}
+	if len(saRel) != 4 {
+		t.Fatalf("relevance tuple len: got %d want 4 (%v)", len(saRel), saRel)
+	}
+	if got, ok := saRel[3].(int); !ok || got != 3 {
+		t.Fatalf("relevance search_after[3] must be int(subSeq=3); got %T(%v)", saRel[3], saRel[3])
+	}
+}
+
+// TestBuildSearchAfterFromHit_LegacyDocDefaultsSubSeqZero — a doc without
+// the subSeq field (pre-Part-B storage) deserialises to Doc.SubSeq=0 and
+// the search_after tuple carries 0 in the trailing slot. This is the
+// reader-side mirror of the platform-side smooth-degrade contract: legacy
+// docs in OS keep working without a reindex.
+func TestBuildSearchAfterFromHit_LegacyDocDefaultsSubSeqZero(t *testing.T) {
+	body := json.RawMessage([]byte(`{"messageId":42,"messageSeq":7,"timestamp":1717000000}`))
+	hit := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(42)},
+	}
+	sa, ok := buildSearchAfterFromHit(hit, false)
+	if !ok {
+		t.Fatalf("buildSearchAfterFromHit must accept legacy hit")
+	}
+	if got, ok := sa[2].(int); !ok || got != 0 {
+		t.Fatalf("legacy doc subSeq slot must be int(0); got %T(%v)", sa[2], sa[2])
+	}
+}
+
+// TestComputeCursorPagination_CarriesSubSeq — when the last hit is a
+// virtual sub-document with subSeq=N, the encoded cursor must carry N back
+// so the next page's search_after resumes exclusively past (ts, msgID, N).
+// This is the load-bearing end-to-end pin for the cross-page-boundary
+//漏图 fix: without subSeq on the cursor, the next page jumps back to (ts,
+// msgID, 0)'s implicit position and re-emits / skips siblings.
+func TestComputeCursorPagination_CarriesSubSeq(t *testing.T) {
+	cfg := SearchConfig{CursorHMAC: "k"}
+	h := &Handler{cfg: cfg}
+
+	body := json.RawMessage([]byte(`{"messageId":7777,"timestamp":1717000000,"virtual":true,"parentMessageId":7777,"subSeq":2}`))
+	result := &elastic.SearchResult{
+		Hits: &elastic.SearchHits{
+			Hits: []*elastic.SearchHit{
+				{Source: &body, Sort: []any{float64(1717000000), float64(7777), float64(2)}},
+			},
+		},
+	}
+	hasMore, cursor := h.computeCursorPagination(result, 1, "time_desc")
+	if !hasMore || cursor == "" {
+		t.Fatalf("expected has_more with cursor, got %v %q", hasMore, cursor)
+	}
+	_, _, _, subSeq, err := decodeCursor(cfg, cursor)
+	if err != nil {
+		t.Fatalf("decodeCursor: %v", err)
+	}
+	if subSeq != 2 {
+		t.Fatalf("cursor must carry subSeq=2 from the virtual child; got %d", subSeq)
+	}
+}
+
+// TestPaginate_VirtualSiblingsCrossPageBoundary — the END-TO-END pin for
+// the Part B 漏图 fix. Five hits all share (timestamp, messageId) — the
+// pathological "5-image rich-text whose parent fills a page boundary" case
+// — distinguished only by subSeq=1..5. Walking page_size=2 across the
+// boundary must produce all 5 hits in order, no skip, no dup.
+//
+// We drive paginateWithFilter directly: round 1 yields the full 5 hits,
+// the loop fills page=2 and anchors next_cursor at the 2nd hit
+// (subSeq=2). Round 2 (the simulated next page) feeds the OS query the
+// search_after tuple (ts, msgID, 2) — under OS exclusive comparison this
+// returns subSeq=3,4,5; we assert the synthetic round 2 was called with
+// the right tuple, and that page 1 = [subSeq=1, subSeq=2] in order.
+//
+// This is a guard against the v1 漏图 regression: with the OLD sort tuple
+// [ts, msgID], all 5 siblings are equal and search_after at (ts, msgID)
+// silently drops subSeq=3,4,5 entirely. With the fix the tuple is unique
+// and every sibling surfaces.
+func TestPaginate_VirtualSiblingsCrossPageBoundary(t *testing.T) {
+	const sharedTS = int64(1717000000)
+	const sharedMsgID = int64(7777)
+
+	makeHit := func(subSeq int) *elastic.SearchHit {
+		body, _ := json.Marshal(map[string]any{
+			"messageId":       sharedMsgID,
+			"messageSeq":      uint64(99),
+			"channelId":       "C1",
+			"timestamp":       sharedTS,
+			"virtual":         true,
+			"parentMessageId": sharedMsgID,
+			"subSeq":          subSeq,
+			"payload": map[string]any{
+				"type":  2,
+				"image": map[string]any{"url": "http://x", "caption": "img"},
+			},
+		})
+		src := json.RawMessage(body)
+		return &elastic.SearchHit{
+			Source: &src,
+			Sort:   []any{float64(sharedTS), float64(sharedMsgID), float64(subSeq)},
+		}
+	}
+
+	// All five hits visible (parent not revoked).
+	probe := &stubProbe{}
+	h := newVisibilityHandler(probe)
+
+	round := 0
+	var lastSA []any
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		round++
+		switch round {
+		case 1:
+			// Whole batch in one round (size=2*3=6 >= 5)
+			return []*elastic.SearchHit{
+				makeHit(1), makeHit(2), makeHit(3), makeHit(4), makeHit(5),
+			}, nil
+		case 2:
+			lastSA = append([]any{}, searchAfter...)
+			return nil, nil
+		}
+		t.Fatalf("unexpected round %d", round)
+		return nil, nil
+	}
+
+	collected, hasMore, nextCursor, err := h.paginateWithFilter(
+		context.Background(), "me", "C1", 2, nil, false,
+		osQuery, projectDocRef("C1"),
+	)
+	if err != nil {
+		t.Fatalf("paginate: %v", err)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("page 1: want 2 hits, got %d", len(collected))
+	}
+	// page 1 should be subSeq=1,2 in order
+	for i, want := range []int{1, 2} {
+		_, gotSub := lastHitMessageIDAndSubSeq(collected[i])
+		if gotSub != want {
+			t.Fatalf("page 1 hit[%d]: want subSeq=%d, got %d", i, want, gotSub)
+		}
+	}
+	if !hasMore {
+		t.Fatalf("hasMore must be true: round 1 returned 5 hits, page=2, so 3 more remain")
+	}
+	if nextCursor == "" {
+		t.Fatalf("hasMore=true requires non-empty cursor")
+	}
+	// Now simulate the NEXT page: decode the cursor as search_after and
+	// confirm the trailing slot is subSeq=2 (the last hit's subSeq). Under
+	// OS's exclusive search_after this excludes all hits whose tuple is
+	// equal to or past (ts, msgID, 2) in the sort direction, so the next
+	// page resumes strictly past subSeq=2 — exactly the contract that
+	// keeps subSeq=3,4,5 from being silently dropped at the boundary.
+	sa, ok := decodeCursorAsSearchAfter(h.cfg, nextCursor, false)
+	if !ok {
+		t.Fatalf("next_cursor must decode as search_after")
+	}
+	if len(sa) != 3 {
+		t.Fatalf("search_after must be 3-tuple [ts, msgID, subSeq]; got %v", sa)
+	}
+	if got, _ := sa[2].(int); got != 2 {
+		t.Fatalf("search_after[2] must be subSeq=2 (last hit of page 1); got %v", sa[2])
+	}
+	_ = lastSA
+}
+

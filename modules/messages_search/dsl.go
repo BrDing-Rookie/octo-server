@@ -127,29 +127,41 @@ func applySpaceIDScope(b *elastic.BoolQuery, channelType uint8, spaceID string) 
 }
 
 // applySort returns a SearchService with the requested sort applied.
-//   - time_desc (default): timestamp desc + messageId desc tiebreaker
-//   - time_asc:           timestamp asc  + messageId asc
-//   - relevance:          timestamp desc + _score desc + messageId desc tiebreaker
+//   - time_desc (default): timestamp desc + messageId desc + subSeq desc
+//   - time_asc:            timestamp asc  + messageId asc  + subSeq asc
+//   - relevance:           timestamp desc + _score desc + messageId desc + subSeq desc
 //
 // `relevance` is rejected upstream by the validator for endpoints (e.g.
 // _search_media) where no keyword is involved.
+//
+// The trailing `subSeq` tiebreaker is the Part B fix for virtual sub-documents
+// (rich-text-derived media/file children) that share (timestamp, messageId)
+// with their parent and their siblings: without it, OS's exclusive
+// search_after at a (ts, msgID) boundary silently drops the remaining
+// same-tuple siblings. Indexer writes subSeq=0 on plain/parent docs and
+// 1..N on virtual children, so the tuple becomes globally unique. Legacy
+// docs without the field deserialise to 0 — same value as plain docs, so
+// the sort stays stable before the indexer field ships.
 func applySort(s *elastic.SearchService, sort string) *elastic.SearchService {
 	switch sort {
 	case "time_asc":
 		return s.SortBy(
 			elastic.NewFieldSort("timestamp").Asc(),
 			elastic.NewFieldSort("messageId").Asc(),
+			elastic.NewFieldSort("subSeq").Asc(),
 		)
 	case "relevance":
 		return s.SortBy(
 			elastic.NewFieldSort("timestamp").Desc(),
 			elastic.NewScoreSort(),
 			elastic.NewFieldSort("messageId").Desc(),
+			elastic.NewFieldSort("subSeq").Desc(),
 		)
 	default:
 		return s.SortBy(
 			elastic.NewFieldSort("timestamp").Desc(),
 			elastic.NewFieldSort("messageId").Desc(),
+			elastic.NewFieldSort("subSeq").Desc(),
 		)
 	}
 }
@@ -323,6 +335,12 @@ func numericToFloat(v any) float64 {
 // duplicated on the next page). It is read from the typed _source
 // (Doc.MessageID, int64) instead, which keeps full precision.
 //
+// subSeq follows the same typed-_source policy: even though subSeq is small
+// enough that float64 won't lose precision, reading it from Doc.SubSeq keeps
+// the same source-of-record contract as messageId — the Sort tuple is the
+// resume-protocol shape (search_after input), the _source is the
+// authoritative value emitted onto the cursor.
+//
 // Invariant: when the last hit yields ts=0 or msgID=0 (e.g. mismatched sort
 // mode, missing sort array, unparsable _source) we return (hasMore=false, "")
 // rather than emitting a half-valid cursor — wire shape requires a non-empty,
@@ -336,25 +354,34 @@ func (h *Handler) computeCursorPagination(result *elastic.SearchResult, pageSize
 	}
 	last := result.Hits.Hits[len(result.Hits.Hits)-1]
 	ts, _, score := extractSortValues(last.Sort, sort == "relevance")
-	msgID := lastHitMessageID(last)
+	msgID, subSeq := lastHitMessageIDAndSubSeq(last)
 	if ts == 0 || msgID == 0 {
 		return false, ""
 	}
-	return true, encodeCursor(h.cfg, ts, msgID, score)
+	return true, encodeCursor(h.cfg, ts, msgID, score, subSeq)
 }
 
 // lastHitMessageID reads the full-precision messageId from a hit's typed
 // _source. Returns 0 when the source is missing or malformed, which the
 // caller treats as "no cursor".
 func lastHitMessageID(hit *elastic.SearchHit) int64 {
+	id, _ := lastHitMessageIDAndSubSeq(hit)
+	return id
+}
+
+// lastHitMessageIDAndSubSeq reads (messageId, subSeq) from a hit's typed
+// _source in one Unmarshal — same precision policy as lastHitMessageID, but
+// also returns the Part B subSeq tiebreaker for cursor encoding. Returns
+// (0, 0) when the source is missing or malformed.
+func lastHitMessageIDAndSubSeq(hit *elastic.SearchHit) (int64, int) {
 	if hit == nil {
-		return 0
+		return 0, 0
 	}
 	var doc Doc
 	if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
-		return 0
+		return 0, 0
 	}
-	return doc.MessageID
+	return doc.MessageID, doc.SubSeq
 }
 
 // buildSearchAfterFromHit reconstructs an OS search_after tuple from a hit
@@ -367,12 +394,15 @@ func lastHitMessageID(hit *elastic.SearchHit) int64 {
 //
 // Sort tuple shapes (must match decodeCursorAsSearchAfter and the sort
 // clauses in dsl.go::buildSearch):
-//   - time_desc / time_asc: [timestamp, messageId]
-//   - relevance:            [timestamp, _score, messageId]
+//   - time_desc / time_asc: [timestamp, messageId, subSeq]
+//   - relevance:            [timestamp, _score, messageId, subSeq]
 //
 // Timestamp comes off hit.Sort[0] as float64 — safe at second precision.
 // _score for relevance comes off hit.Sort[1] as float64 — same as OS uses
-// internally.
+// internally. subSeq comes off Doc.SubSeq (typed _source) so the cursor's
+// emitted value matches the indexer's authoritative write rather than the
+// float64-decoded Sort entry (Part B; see
+// docs/messages-search/richtext-virtual-docs-cursor-tiebreaker-for-indexer.md).
 //
 // Returns ok=false when the typed _source can't be parsed or hit.Sort is
 // malformed. Caller should stop the round loop on !ok rather than resume
@@ -381,7 +411,7 @@ func buildSearchAfterFromHit(hit *elastic.SearchHit, isRelevance bool) ([]any, b
 	if hit == nil {
 		return nil, false
 	}
-	msgID := lastHitMessageID(hit)
+	msgID, subSeq := lastHitMessageIDAndSubSeq(hit)
 	if msgID == 0 {
 		return nil, false
 	}
@@ -391,11 +421,11 @@ func buildSearchAfterFromHit(hit *elastic.SearchHit, isRelevance bool) ([]any, b
 		}
 		ts := numericTo64(hit.Sort[0])
 		score := numericToFloat(hit.Sort[1])
-		return []any{ts, score, msgID}, true
+		return []any{ts, score, msgID, subSeq}, true
 	}
 	if len(hit.Sort) < 2 {
 		return nil, false
 	}
 	ts := numericTo64(hit.Sort[0])
-	return []any{ts, msgID}, true
+	return []any{ts, msgID, subSeq}, true
 }
