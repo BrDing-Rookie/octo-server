@@ -79,6 +79,11 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 			t.Errorf("DSL missing %q in:\n%s", want, body)
 		}
 	}
+	// payload.type whitelist may serialise with or without spaces depending on
+	// the elastic library's marshalling — accept both shapes.
+	if !strings.Contains(body, `"payload.type":[1,11,14]`) && !strings.Contains(body, `"payload.type":[1, 11, 14]`) {
+		t.Errorf("DSL missing terms payload.type [1,11,14] in:\n%s", body)
+	}
 }
 
 func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
@@ -107,6 +112,193 @@ func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword DSL missing %q in:\n%s", want, body)
 		}
+	}
+	if !strings.Contains(body, `"payload.type":[1,11,14]`) && !strings.Contains(body, `"payload.type":[1, 11, 14]`) {
+		t.Errorf("empty-keyword DSL missing terms payload.type [1,11,14] in:\n%s", body)
+	}
+}
+
+// TestBuildSearchMessagesDSL_KeywordFieldsWhitelist pins the contract that the
+// /_search multi_match keyword clause targets EXACTLY the three text-bearing
+// projections that align with the payload.type whitelist [1, 11, 14]:
+// payload.text.content^3 (text=1), payload.richText.searchText^3 (richText=14),
+// payload.mergeForward.msgs.searchText (mergeForward=11). The previously listed
+// image.caption / image.name / file.caption / file.name fields became dead
+// branches once the type whitelist excluded image(2) and file(8) — kept here as
+// a regression pin so any future revival surfaces in test, not in production.
+func TestBuildSearchMessagesDSL_KeywordFieldsWhitelist(t *testing.T) {
+	req := SearchMessagesReq{
+		ChannelType: channelTypeGroup,
+		ChannelID:   "g",
+		Keyword:     "hello",
+	}
+	q, _ := buildSearchMessagesDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+	src, err := q.(interface{ Source() (any, error) }).Source()
+	if err != nil {
+		t.Fatalf("Source(): %v", err)
+	}
+	raw, _ := json.Marshal(src)
+	body := string(raw)
+
+	// Negative substring guard: no media / file projection should appear in
+	// the /_search query at all (multi_match or otherwise). Highlight config
+	// is built separately and is asserted in its own test.
+	for _, banned := range []string{
+		"payload.image.caption",
+		"payload.image.name",
+		"payload.file.caption",
+		"payload.file.name",
+	} {
+		if strings.Contains(body, banned) {
+			t.Errorf("/_search DSL must not reference %q (whitelist [1,11,14] excludes image/file): %s", banned, body)
+		}
+	}
+
+	// Walk the marshalled DSL to find every multi_match.fields array and
+	// assert each one is the exact whitelist (length + order + content).
+	want := []string{
+		"payload.text.content^3",
+		"payload.richText.searchText^3",
+		"payload.mergeForward.msgs.searchText",
+	}
+	var found int
+	var walk func(any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case map[string]any:
+			if mm, ok := v["multi_match"].(map[string]any); ok {
+				rawFields, ok := mm["fields"].([]any)
+				if !ok {
+					t.Errorf("multi_match has no fields array: %v", mm)
+					return
+				}
+				if len(rawFields) != len(want) {
+					t.Errorf("multi_match.fields length = %d, want %d: %v", len(rawFields), len(want), rawFields)
+					return
+				}
+				for i, f := range rawFields {
+					if f.(string) != want[i] {
+						t.Errorf("multi_match.fields[%d] = %q, want %q", i, f, want[i])
+					}
+				}
+				found++
+			}
+			for _, child := range v {
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
+		}
+	}
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	walk(normalized)
+	if found == 0 {
+		t.Errorf("expected at least one multi_match clause in /_search DSL, got 0: %s", body)
+	}
+}
+
+// TestBuildSearchMessagesDSL_TypeWhitelist pins the contract that /_search
+// returns ONLY text (payload.type=1), mergeForward (payload.type=11), and
+// richText (payload.type=14) messages. Image / voice / video / file payloads
+// are served through the dedicated /_search_media, /_search_files,
+// /_search_all surfaces — they must not surface on the legacy /_search
+// response, whose client UI only renders text/richText/mergeForward snippets.
+//
+// Asserted shape: bool.filter contains exactly one terms(payload.type) clause,
+// whose array equals [1, 11, 14] (order matters — matches the indexer's terms
+// query input order in buildSearchMessagesDSL).
+func TestBuildSearchMessagesDSL_TypeWhitelist(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		keyword string
+	}{
+		{"keyword", "hello"},
+		{"browse", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := SearchMessagesReq{
+				ChannelType: channelTypeGroup,
+				ChannelID:   "g",
+				Keyword:     tc.keyword,
+			}
+			q, _ := buildSearchMessagesDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+			src, err := q.(interface{ Source() (any, error) }).Source()
+			if err != nil {
+				t.Fatalf("Source(): %v", err)
+			}
+			raw, _ := json.Marshal(src)
+			var normalized map[string]any
+			if err := json.Unmarshal(raw, &normalized); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			boolNode, ok := normalized["bool"].(map[string]any)
+			if !ok {
+				t.Fatalf("query has no bool node: %s", raw)
+			}
+			rawFilter, ok := boolNode["filter"]
+			if !ok {
+				t.Fatalf("bool has no filter: %s", raw)
+			}
+			var filters []any
+			switch v := rawFilter.(type) {
+			case []any:
+				filters = v
+			case map[string]any:
+				filters = []any{v}
+			default:
+				t.Fatalf("filter has unexpected shape %T: %s", rawFilter, raw)
+			}
+
+			var matched bool
+			for _, clause := range filters {
+				m, ok := clause.(map[string]any)
+				if !ok {
+					continue
+				}
+				terms, ok := m["terms"].(map[string]any)
+				if !ok {
+					continue
+				}
+				arr, ok := terms["payload.type"].([]any)
+				if !ok {
+					continue
+				}
+				if len(arr) != 3 {
+					t.Errorf("payload.type whitelist must be exactly 3 entries, got %d: %v", len(arr), arr)
+					continue
+				}
+				got := []int{int(arr[0].(float64)), int(arr[1].(float64)), int(arr[2].(float64))}
+				want := []int{payloadTypeText, payloadTypeMergeForward, payloadTypeRichText}
+				if got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+					t.Errorf("payload.type whitelist mismatch: got %v want %v", got, want)
+				}
+				// Reject every disallowed payload type explicitly so any future
+				// regression (someone adds payloadTypeImage to the whitelist)
+				// surfaces here, not in production.
+				for _, banned := range []int{
+					payloadTypeImage,
+					payloadTypeGIF,
+					payloadTypeVoice,
+					payloadTypeVideo,
+					payloadTypeFile,
+				} {
+					for _, v := range got {
+						if v == banned {
+							t.Errorf("payload.type whitelist must not include %d (media/file): %v", banned, got)
+						}
+					}
+				}
+				matched = true
+			}
+			if !matched {
+				t.Errorf("bool.filter has no terms(payload.type) whitelist clause:\n%s", raw)
+			}
+		})
 	}
 }
 
@@ -326,11 +518,19 @@ func TestBuildSearchMessagesHighlight_IncludesRichText(t *testing.T) {
 		`"payload.text.content"`,
 		`"payload.richText.searchText"`,
 		`"payload.mergeForward.msgs.searchText"`,
-		`"payload.image.caption"`,
-		`"payload.file.name"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("search_messages highlight missing %q in:\n%s", want, body)
+		}
+	}
+	// Negative pin: type whitelist [1,11,14] never reaches image/file payloads,
+	// so highlighting those fields is dead config.
+	for _, deny := range []string{
+		`"payload.image.caption"`,
+		`"payload.file.name"`,
+	} {
+		if strings.Contains(body, deny) {
+			t.Errorf("search_messages highlight should not include %q in:\n%s", deny, body)
 		}
 	}
 }
