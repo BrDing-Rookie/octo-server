@@ -102,6 +102,19 @@ func TestBuildAroundDSL_GroupNoSpaceTerm(t *testing.T) {
 	}
 }
 
+// V8-b adjacent — the around window DSL must also carry the Part-B virtual
+// pre-wire so a future virtual media/file sub-document cannot surface as a
+// standalone message in the chronological window.
+func TestBuildAroundDSL_ExcludesVirtual(t *testing.T) {
+	req := SearchAroundReq{ChannelType: channelTypeGroup, ChannelID: "G1"}
+	body := asJSONString(t, buildAroundDSL(req, "G1", "").(interface {
+		Source() (any, error)
+	}))
+	if !strings.Contains(body, `"virtual":true`) {
+		t.Fatalf("around DSL must exclude virtual sub-documents, got:\n%s", body)
+	}
+}
+
 func newAroundCtx(t *testing.T, bodyJSON string) (*wkhttp.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -156,6 +169,9 @@ func TestBuildAnchorDSL_ExcludesCmdAndRevoked(t *testing.T) {
 	}
 	if !strings.Contains(body, `"revoked":true`) {
 		t.Fatalf("anchor DSL must exclude revoked docs, got:\n%s", body)
+	}
+	if !strings.Contains(body, `"virtual":true`) {
+		t.Fatalf("anchor DSL must exclude virtual sub-documents (Part B pre-wire), got:\n%s", body)
 	}
 }
 

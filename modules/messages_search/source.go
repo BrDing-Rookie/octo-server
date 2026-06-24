@@ -45,6 +45,7 @@ type Payload struct {
 	Video        *VideoPayload        `json:"video,omitempty"`
 	File         *FilePayload         `json:"file,omitempty"`
 	MergeForward *MergeForwardPayload `json:"mergeForward,omitempty"`
+	RichText     *RichTextPayload     `json:"richText,omitempty"`
 }
 
 type TextPayload struct {
@@ -88,6 +89,15 @@ type MergeForwardPayload struct {
 	Msgs       []MergeForwardMsg `json:"msgs,omitempty"`
 }
 
+// RichTextPayload mirrors the indexer's richText projection. Only `searchText`
+// is materialised here — the full block tree (text/image/file blocks) lives in
+// payloadRaw on the OS doc and is not read by the search path. searchText is
+// the indexer's plain-text join of all rich-text blocks plus embedded
+// image/file name+caption, written under analyzer ik_max_word. See Part A doc.
+type RichTextPayload struct {
+	SearchText string `json:"searchText,omitempty"`
+}
+
 // MergeForwardMsg is the per-child projection from `payload.mergeForward.msgs[]`.
 // `from` and `timestamp` are forward-compat fields the indexer will start
 // writing in a follow-up release; both are omitempty so older OS docs (which
@@ -112,6 +122,7 @@ const (
 	payloadTypeVideo        = 5
 	payloadTypeFile         = 8
 	payloadTypeMergeForward = 11
+	payloadTypeRichText     = 14
 	payloadTypeCmd          = 99
 
 	// System message range per indexer spec

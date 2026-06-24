@@ -146,6 +146,7 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	if req.Keyword != "" {
 		clause, err := buildKeywordClauseGated(ctx, analyzer, stopwordStripEnabled, req.Keyword,
 			"payload.text.content^3",
+			"payload.richText.searchText^3",
 			"payload.image.caption", "payload.image.name",
 			"payload.file.caption", "payload.file.name",
 			"payload.mergeForward.msgs.searchText",
@@ -157,6 +158,7 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)
 	applySystemMessageHardFilter(b)
+	applyExcludeVirtual(b)
 	return b, analyzeErr
 }
 
@@ -168,6 +170,7 @@ func buildSearchMessagesHighlight() *elastic.Highlight {
 		FragmentSize(120).
 		NumOfFragments(1).
 		Field("payload.text.content").
+		Field("payload.richText.searchText").
 		Field("payload.mergeForward.msgs.searchText").
 		Field("payload.image.caption").
 		Field("payload.file.name")

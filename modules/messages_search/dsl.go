@@ -88,6 +88,18 @@ func applySystemMessageHardFilter(b *elastic.BoolQuery) {
 	b.MustNot(elastic.NewRangeQuery("payload.type").Gte(payloadTypeSystemMin).Lte(payloadTypeSystemMax))
 }
 
+// applyExcludeVirtual hangs `must_not(virtual=true)` on the text-side DSL so
+// virtual media/file sub-documents derived from rich-text messages (Part B,
+// payload.type=2/5/8) cannot surface as standalone messages in /_search,
+// /_search_all, or /_search_around. Until Part B lands the `virtual` field
+// does not exist in the mapping and this term matches zero documents — a
+// no-op for current corpora, byte-different only in DSL pin tests. The
+// media/file endpoints (/_search_media, /_search_files) deliberately omit
+// this filter so their virtual children remain reachable.
+func applyExcludeVirtual(b *elastic.BoolQuery) {
+	b.MustNot(elastic.NewTermQuery("virtual", true))
+}
+
 // applySpaceIDScope layers the per-Space term filter onto the bool query for
 // p2p (channel_type=1) search only. Group and thread searches are already
 // space-scoped at the channel level (channel_id encodes the parent space) so
@@ -151,6 +163,7 @@ func pickSnippet(h map[string][]string) string {
 	}
 	for _, field := range []string{
 		"payload.text.content",
+		"payload.richText.searchText",
 		"payload.mergeForward.msgs.searchText",
 		"payload.image.caption",
 		"payload.file.name",
@@ -186,6 +199,9 @@ func fallbackSnippet(p *Payload) string {
 	}
 	if p.Text != nil && p.Text.Content != "" {
 		return truncateRunes(p.Text.Content, snippetWindow)
+	}
+	if p.RichText != nil && p.RichText.SearchText != "" {
+		return truncateRunes(p.RichText.SearchText, snippetWindow)
 	}
 	if p.MergeForward != nil {
 		for _, m := range p.MergeForward.Msgs {

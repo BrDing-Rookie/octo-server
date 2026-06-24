@@ -64,6 +64,7 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 		`"multi_match"`,
 		`"hello"`,
 		`"payload.text.content^3"`,
+		`"payload.richText.searchText^3"`,
 		`"payload.mergeForward.msgs.searchText"`,
 		`"channelId":"groupNo"`,
 		`"revoked":true`,
@@ -72,6 +73,7 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 		`"to":2000`,
 		`"include_lower":true`,
 		`"include_upper":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("DSL missing %q in:\n%s", want, body)
@@ -100,6 +102,7 @@ func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 		`"to":2000`,
 		`"include_lower":true`,
 		`"include_upper":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword DSL missing %q in:\n%s", want, body)
@@ -273,6 +276,12 @@ func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 	if strings.Contains(body, "multi_match") {
 		t.Errorf("media DSL must not include multi_match")
 	}
+	// Part B virtual-children intentionally surface in /_search_media, so the
+	// must_not(virtual=true) helper from /_search and friends MUST NOT appear
+	// here.
+	if strings.Contains(body, `"virtual"`) {
+		t.Errorf("media DSL must NOT carry virtual filter:\n%s", body)
+	}
 }
 
 func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
@@ -287,6 +296,9 @@ func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 	}
 	if !strings.Contains(body, `"payload.type":8`) {
 		t.Errorf("file DSL must filter type=8:\n%s", body)
+	}
+	if strings.Contains(body, `"virtual"`) {
+		t.Errorf("file DSL must NOT carry virtual filter:\n%s", body)
 	}
 }
 
@@ -305,6 +317,38 @@ func TestBuildSearchFilesDSL_KeywordIncludesMultiMatch(t *testing.T) {
 	}
 }
 
+// Highlight pin tests — the two text-side highlight builders must include
+// payload.richText.searchText so a rich-text keyword hit surfaces a marked
+// fragment under the same field name the snippet projection reads.
+func TestBuildSearchMessagesHighlight_IncludesRichText(t *testing.T) {
+	body := asJSONString(t, buildSearchMessagesHighlight())
+	for _, want := range []string{
+		`"payload.text.content"`,
+		`"payload.richText.searchText"`,
+		`"payload.mergeForward.msgs.searchText"`,
+		`"payload.image.caption"`,
+		`"payload.file.name"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search_messages highlight missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestBuildSearchAllHighlight_IncludesRichText(t *testing.T) {
+	body := asJSONString(t, buildSearchAllHighlight())
+	for _, want := range []string{
+		`"payload.text.content"`,
+		`"payload.richText.searchText"`,
+		`"payload.mergeForward.msgs.searchText"`,
+		`"payload.file.name"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search_all highlight missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 	req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g", Keyword: "k"}
 	q, _ := buildSearchAllDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
@@ -313,10 +357,12 @@ func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 	})))
 	body := string(js)
 	for _, want := range []string{
-		`"payload.type":[1,8,11]`,
+		`"payload.type":[1,8,11,14]`,
 		`"minimum_should_match":"1"`,
 		`"payload.text.content^3"`,
+		`"payload.richText.searchText"`,
 		`"payload.file.name^2"`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) && !strings.Contains(body, strings.ReplaceAll(want, ",", ", ")) {
 			t.Errorf("search_all DSL missing %q in:\n%s", want, body)
@@ -343,14 +389,15 @@ func TestBuildSearchAllDSL_NoKeywordKeepsTypeFilter(t *testing.T) {
 	for _, want := range []string{
 		`"channelId":"g"`,
 		`"revoked":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword search_all DSL missing %q in:\n%s", want, body)
 		}
 	}
 	// type filter must still segment message vs file
-	if !strings.Contains(body, `"payload.type":[1,8,11]`) && !strings.Contains(body, `"payload.type":[1, 8, 11]`) {
-		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11]:\n%s", body)
+	if !strings.Contains(body, `"payload.type":[1,8,11,14]`) && !strings.Contains(body, `"payload.type":[1, 8, 11, 14]`) {
+		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11,14]:\n%s", body)
 	}
 }
 

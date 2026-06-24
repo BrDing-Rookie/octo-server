@@ -130,10 +130,12 @@ func buildSearchAllDSL(ctx context.Context, analyzer tokenAnalyzer, stopwordStri
 	b := elastic.NewBoolQuery()
 	applyChannelAndRevoked(b, normChannelID)
 	applySpaceIDScope(b, req.ChannelType, spaceID)
+	applyExcludeVirtual(b)
 	b.Filter(elastic.NewTermsQuery("payload.type",
 		payloadTypeText,
 		payloadTypeFile,
 		payloadTypeMergeForward,
+		payloadTypeRichText,
 	))
 	addCommonFilters(b, req.Filters)
 	var analyzeErr error
@@ -152,6 +154,7 @@ func buildSearchAllDSL(ctx context.Context, analyzer tokenAnalyzer, stopwordStri
 		// branches — the eff/useMSM defaults above match that contract.
 		textClause := buildKeywordClauseFromAnalyzed(eff, useMSM,
 			"payload.text.content^3",
+			"payload.richText.searchText",
 			"payload.mergeForward.msgs.searchText",
 		)
 		fileClause := buildKeywordClauseFromAnalyzed(eff, useMSM,
@@ -170,6 +173,7 @@ func buildSearchAllHighlight() *elastic.Highlight {
 		FragmentSize(120).
 		NumOfFragments(1).
 		Field("payload.text.content").
+		Field("payload.richText.searchText").
 		Field("payload.mergeForward.msgs.searchText").
 		Field("payload.file.name")
 }

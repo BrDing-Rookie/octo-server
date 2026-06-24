@@ -224,6 +224,26 @@ func TestUnmarshalDoc_File(t *testing.T) {
 	}
 }
 
+// TestUnmarshalDoc_RichText covers the indexer's payload.richText shape: a
+// payload.type=14 doc carrying the plain-text projection in
+// payload.richText.searchText.
+func TestUnmarshalDoc_RichText(t *testing.T) {
+	src := `{"messageId":1,"messageSeq":1,"channelId":"g","timestamp":100,"payload":{"type":14,"richText":{"searchText":"标题 正文 图片说明"}}}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Payload.RichText == nil {
+		t.Fatalf("richText payload must be populated")
+	}
+	if got := doc.Payload.RichText.SearchText; got != "标题 正文 图片说明" {
+		t.Fatalf("searchText: got %q", got)
+	}
+	if payloadType(doc.Payload) != payloadTypeRichText {
+		t.Fatalf("payloadType: got %d", payloadType(doc.Payload))
+	}
+}
+
 func TestClassifyKind_Forward(t *testing.T) {
 	p := &Payload{MergeForward: &MergeForwardPayload{ChildCount: 3}}
 	if got := classifyKind(p); got != "forward" {
@@ -245,6 +265,28 @@ func TestClassifyKind_Text(t *testing.T) {
 	p = &Payload{Type: &tp, Image: &ImagePayload{}}
 	if got := classifyKind(p); got != "text" {
 		t.Fatalf("image folds to text: got %q", got)
+	}
+}
+
+// Rich-text is folded into "text" — we deliberately don't expose a "richtext"
+// kind on the wire (the swagger enum is ["text","forward"]), so the client
+// keeps a stable two-value contract and renders richText via the existing
+// text path. Forward still wins when both shapes are present.
+func TestClassifyKind_RichTextFoldsIntoText(t *testing.T) {
+	tp := payloadTypeRichText
+	p := &Payload{Type: &tp, RichText: &RichTextPayload{SearchText: "hi"}}
+	if got := classifyKind(p); got != "text" {
+		t.Fatalf("richtext must fold into text: got %q", got)
+	}
+	// Forward wins over richtext (impossible in practice, but the priority is
+	// part of the contract).
+	p2 := &Payload{
+		Type:         &tp,
+		RichText:     &RichTextPayload{SearchText: "hi"},
+		MergeForward: &MergeForwardPayload{ChildCount: 1},
+	}
+	if got := classifyKind(p2); got != "forward" {
+		t.Fatalf("forward must beat richtext: got %q", got)
 	}
 }
 
@@ -285,12 +327,33 @@ func TestPickSnippet(t *testing.T) {
 	if got := pickSnippet(nil); got != "" {
 		t.Fatalf("empty: got %q", got)
 	}
+	// RichText sits between text.content and mergeForward in priority: when
+	// only richText highlighted (no plain text matched) it must win.
+	if got := pickSnippet(map[string][]string{
+		"payload.richText.searchText":          {"<mark>标</mark>题"},
+		"payload.mergeForward.msgs.searchText": {"forward x"},
+	}); got != "<mark>标</mark>题" {
+		t.Fatalf("richText must beat mergeForward in priority, got %q", got)
+	}
+	// And text.content still beats richText.
+	if got := pickSnippet(map[string][]string{
+		"payload.text.content":        {"<mark>plain</mark>"},
+		"payload.richText.searchText": {"rt"},
+	}); got != "<mark>plain</mark>" {
+		t.Fatalf("text.content must beat richText, got %q", got)
+	}
 }
 
 func TestFallbackSnippet(t *testing.T) {
 	txt := 5
 	if got := fallbackSnippet(&Payload{Type: &txt, Text: &TextPayload{Content: "群聊测试消息"}}); got != "群聊测试消息" {
 		t.Fatalf("text content: got %q", got)
+	}
+	// RichText fills in when text.content is absent (the empty-keyword
+	// browse path on a type=14 doc).
+	rt := payloadTypeRichText
+	if got := fallbackSnippet(&Payload{Type: &rt, RichText: &RichTextPayload{SearchText: "富文本预览"}}); got != "富文本预览" {
+		t.Fatalf("richText fallback: got %q", got)
 	}
 	// merge-forward: first non-empty child searchText wins.
 	mf := &Payload{MergeForward: &MergeForwardPayload{Msgs: []MergeForwardMsg{
