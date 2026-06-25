@@ -449,9 +449,12 @@ func (h *Handler) resolveCursorDepth(c *wkhttp.Context, cursor string, pageSize 
 //
 // The trailing subSeq element (Part B virtual-doc tiebreaker) is appended
 // for both sort modes — pre-Part-B cursors decode to subSeq=0 and the
-// emitted tuple is search_after-exclusive, so legacy cursors keep working
-// (they just resume one tiebreaker step earlier and pick up any
-// same-(ts,msgID) virtual children on the next page).
+// emitted tuple is search_after-exclusive, so legacy cursors keep working.
+// Whether same-(ts,msgID) virtual children resume on the next page is
+// sort-direction dependent (time_asc surfaces them; time_desc/relevance DESC
+// skips subSeq>=1 children) — acceptable because legacy cursors only live in
+// the deploy-transition window and the next fresh query self-heals. See the
+// Cursor.SubSeq doc in cursor.go for the full direction analysis.
 func decodeCursorAsSearchAfter(cfg SearchConfig, cursor string, isRelevanceSort bool) ([]any, bool) {
 	if cursor == "" {
 		return nil, true

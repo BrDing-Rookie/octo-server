@@ -30,9 +30,17 @@ type cursorPayload struct {
 	// Plain docs / parent docs encode 0; virtual children encode their
 	// 1-based block index. omitempty keeps pre-Part-B cursors byte-identical
 	// to the old encoding — a pre-Part-B cursor decodes to SubSeq=0, which
-	// matches the plain-doc convention and (under exclusive search_after)
-	// lets every same-(ts,msgID) virtual child surface on the next page
-	// rather than being silently skipped.
+	// matches the plain-doc convention. Effect on same-(ts,msgID) virtual
+	// children under exclusive search_after is sort-direction dependent:
+	//   - time_asc:  search_after=[..,0] resumes BEFORE subSeq>=1, so children
+	//                still surface on the next page (not skipped).
+	//   - time_desc / relevance (DESC): search_after=[..,0] resumes after
+	//                subSeq=0 descending, so same-(ts,msgID) children at
+	//                subSeq>=1 are skipped.
+	// Acceptable either way: legacy cursors only exist within the brief
+	// deploy-transition window, and the next fresh query (with a Part-B cursor)
+	// self-heals — the results match pre-Part-B behaviour, just missing the
+	// newly-added virtual docs during the transition.
 	SubSeq int `json:"q,omitempty"`
 }
 
