@@ -12,6 +12,14 @@ import (
 )
 
 // MessageHit is the response shape per A doc §2.1.
+//
+// MediaKind / ThumbURL / Width / Height / DurationMs are populated only for
+// image (payload.type=2) and video (payload.type=5) hits surfaced by
+// /_search_all browse mode (or by /_search_around, which has no type
+// whitelist). They mirror MediaHit's renderable fields so the client can
+// render a media card directly from a MessageHit without a separate
+// projection. All are omitempty so plain text / forward hits keep their wire
+// shape unchanged.
 type MessageHit struct {
 	MessageID       string         `json:"message_id"`
 	MessageSeq      int64          `json:"message_seq"`
@@ -24,6 +32,10 @@ type MessageHit struct {
 	OuterPreview    *OuterPreview  `json:"outer_preview,omitempty"`
 	InnerMessages   []InnerMessage `json:"inner_messages,omitempty"`
 	ChannelID       string         `json:"channel_id"`
+	ThumbURL        string         `json:"thumb_url,omitempty"`
+	Width           int            `json:"width,omitempty"`
+	Height          int            `json:"height,omitempty"`
+	DurationMs      int64          `json:"duration_ms,omitempty"`
 }
 
 func init() {
@@ -159,7 +171,8 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	// dedicated /_search_media and /_search_files surfaces — surfacing them
 	// on the legacy /_search response was confusing the client UI which can
 	// only render text/richText/mergeForward snippets. Sibling endpoints
-	// already use the same `terms` shape: /_search_all → [1,8,11,14],
+	// already use the same `terms` shape: /_search_all → [1,8,11,14] in the
+	// keyword path and [1,8,11,14,2,5] in browse mode (keyword=""),
 	// /_search_media → [2,5], /_search_files → [8].
 	b.Filter(elastic.NewTermsQuery("payload.type",
 		payloadTypeText,
@@ -242,7 +255,7 @@ func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][
 	if snippet == "" {
 		snippet = fallbackSnippet(doc.Payload)
 	}
-	return MessageHit{
+	mh := MessageHit{
 		MessageID:     strconv.FormatInt(doc.MessageID, 10),
 		MessageSeq:    int64(doc.MessageSeq),
 		MessageKind:   classifyKind(doc.Payload),
@@ -252,5 +265,32 @@ func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][
 		OuterPreview:  buildOuterPreview(doc.Payload),
 		InnerMessages: buildInnerMessages(doc.Payload),
 		ChannelID:     encodeChannelID(reqChannelID),
+	}
+	applyMediaProjection(&mh, doc.Payload)
+	return mh
+}
+
+// applyMediaProjection mirrors MediaHit's renderable fields onto a MessageHit
+// for image (payload.type=2) and video (payload.type=5) hits. Image surfaces
+// payload.image.url as ThumbURL (v1.8 mapping has no separate thumb URL field;
+// the original URL is always renderable and the client can apply CDN sizing
+// parameters); video surfaces payload.video.cover and the second→ms duration
+// conversion. Both use omitempty fields, so plain text / forward / file hits
+// keep their existing wire shape byte-identical.
+func applyMediaProjection(mh *MessageHit, p *Payload) {
+	switch payloadType(p) {
+	case payloadTypeImage:
+		if img := imagePayloadOf(p); img != nil {
+			mh.ThumbURL = img.URL
+			mh.Width = img.Width
+			mh.Height = img.Height
+		}
+	case payloadTypeVideo:
+		if vid := videoPayloadOf(p); vid != nil {
+			mh.ThumbURL = vid.Cover
+			mh.Width = vid.Width
+			mh.Height = vid.Height
+			mh.DurationMs = int64(vid.Second) * 1000
+		}
 	}
 }

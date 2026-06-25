@@ -326,11 +326,42 @@ func TestClassifyKind_Text(t *testing.T) {
 	if got := classifyKind(p); got != "text" {
 		t.Fatalf("text: got %q", got)
 	}
-	// Quote / reply (any non-mergeForward case) folds into "text".
-	tp = 2
-	p = &Payload{Type: &tp, Image: &ImagePayload{}}
-	if got := classifyKind(p); got != "text" {
-		t.Fatalf("image folds to text: got %q", got)
+}
+
+// Image (payload.type=2) gets its own kind so the client can dispatch to the
+// media renderer. Reaches both /_search_all browse mode (DSL whitelists 2 when
+// keyword="") and /_search_around (no type whitelist).
+func TestClassifyKind_Image(t *testing.T) {
+	tp := payloadTypeImage
+	p := &Payload{Type: &tp, Image: &ImagePayload{URL: "http://x"}}
+	if got := classifyKind(p); got != "image" {
+		t.Fatalf("image kind: got %q", got)
+	}
+}
+
+// Video (payload.type=5) — same as image. Both reach singleMessageHit only
+// through /_search_all browse and /_search_around (the legacy /_search keeps
+// its [1,11,14] whitelist).
+func TestClassifyKind_Video(t *testing.T) {
+	tp := payloadTypeVideo
+	p := &Payload{Type: &tp, Video: &VideoPayload{Cover: "http://c"}}
+	if got := classifyKind(p); got != "video" {
+		t.Fatalf("video kind: got %q", got)
+	}
+}
+
+// Forward beats image/video: a forward card whose first child is media still
+// renders as a forward, because the outer mergeForward is what the row stands
+// for.
+func TestClassifyKind_ForwardBeatsMedia(t *testing.T) {
+	tp := payloadTypeImage
+	p := &Payload{
+		Type:         &tp,
+		Image:        &ImagePayload{URL: "http://x"},
+		MergeForward: &MergeForwardPayload{ChildCount: 1},
+	}
+	if got := classifyKind(p); got != "forward" {
+		t.Fatalf("forward must beat image: got %q", got)
 	}
 }
 
