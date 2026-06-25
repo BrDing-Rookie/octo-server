@@ -131,7 +131,7 @@ func applyExcludeVirtual(b *elastic.BoolQuery) {
    - `filterVisible`：构造 virtual 子文档，撤回父 → 子被过滤
    - `buildMediaHits` / `buildFileHits`：virtual doc 投影出的响应 `message_id` = 父值
      （透传子文档 `messageId` 字段，依赖 indexer 契约——无 reader 代码改动）
-6. **测试环境验证（集群 A，走 `dmworkim-develop`）**：
+6. **测试环境验证（走测试环境部署）**：
    - indexer rollout + backfill 完成后
    - `_search_media` / `_search_files` 查富文本里的"合同图片"/"xx.pdf"附件 → 应直接召回
    - `_search` / `_search_all` 命中富文本父消息（Part A 行为），不再额外冒出子文档污染列表
