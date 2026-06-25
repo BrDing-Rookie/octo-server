@@ -77,6 +77,41 @@ func TestSplitAroundWindow_NoBefore(t *testing.T) {
 	}
 }
 
+// Regression for the /_search_around media-snippet path: the around window has
+// no payload-type whitelist, so image (type=2) and file (type=8) docs surface
+// in the wings. singleMessageHit must still produce a non-empty snippet for
+// them via the fallback chain (image.caption / file.name) — otherwise the
+// client renders a blank row. Pins the behaviour that was lost when the
+// image/file branches were briefly dropped from pickSnippet/fallbackSnippet.
+func TestSingleMessageHit_AroundMediaSnippetNonEmpty(t *testing.T) {
+	h := &Handler{cfg: SearchConfig{}}
+	img := payloadTypeImage
+	imgDoc := Doc{
+		MessageID: 101,
+		From:      "u1",
+		Payload: &Payload{
+			Type:  &img,
+			Image: &ImagePayload{Caption: "野餐合影"},
+		},
+	}
+	if got := h.singleMessageHit(imgDoc, "C1", nil).Snippet; got != "野餐合影" {
+		t.Fatalf("image hit must carry caption snippet in /_search_around, got %q", got)
+	}
+
+	file := payloadTypeFile
+	fileDoc := Doc{
+		MessageID: 102,
+		From:      "u1",
+		Payload: &Payload{
+			Type: &file,
+			File: &FilePayload{Name: "season-plan.pdf"},
+		},
+	}
+	if got := h.singleMessageHit(fileDoc, "C1", nil).Snippet; got != "season-plan.pdf" {
+		t.Fatalf("file hit must carry filename snippet in /_search_around, got %q", got)
+	}
+}
+
 // buildAroundDSL must carry the spaceId term for p2p (so a cross-Space window
 // can't be assembled) and exclude cmd messages; it must NOT carry a keyword.
 func TestBuildAroundDSL_P2PSpaceScoped(t *testing.T) {

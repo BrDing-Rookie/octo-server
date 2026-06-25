@@ -387,14 +387,16 @@ func TestPickSnippet(t *testing.T) {
 	if got := pickSnippet(hl); !strings.Contains(got, "world") {
 		t.Fatalf("priority: text content should win, got %q", got)
 	}
-	// image/file fields are no longer in the priority list — the /_search type
-	// whitelist [1,11,14] never delivers those docs, so a hit that only
-	// highlighted image.caption / file.name yields no snippet.
-	if got := pickSnippet(map[string][]string{"payload.file.name": {"x"}}); got != "" {
-		t.Fatalf("file field must be ignored post-whitelist, got %q", got)
+	// image/file fields stay in the priority list — /_search_around (no
+	// payload-type whitelist) routes hits through the same snippet picker, so
+	// a media-only hit must still surface caption / filename rather than be
+	// blanked out. /_search applies its [1,11,14] whitelist upstream of this
+	// function, so the extra branches do not affect that path.
+	if got := pickSnippet(map[string][]string{"payload.file.name": {"x"}}); got != "x" {
+		t.Fatalf("file fallback: got %q", got)
 	}
-	if got := pickSnippet(map[string][]string{"payload.image.caption": {"y"}}); got != "" {
-		t.Fatalf("image field must be ignored post-whitelist, got %q", got)
+	if got := pickSnippet(map[string][]string{"payload.image.caption": {"y"}}); got != "y" {
+		t.Fatalf("image fallback: got %q", got)
 	}
 	if got := pickSnippet(nil); got != "" {
 		t.Fatalf("empty: got %q", got)
@@ -434,13 +436,14 @@ func TestFallbackSnippet(t *testing.T) {
 	if got := fallbackSnippet(mf); got != "转发预览" {
 		t.Fatalf("merge-forward: got %q", got)
 	}
-	// image/file no longer fall back — the /_search whitelist [1,11,14] never
-	// delivers those payloads, so they yield no snippet (omitted on the wire).
-	if got := fallbackSnippet(&Payload{Image: &ImagePayload{Caption: "图说"}}); got != "" {
-		t.Fatalf("image caption must not fall back post-whitelist, got %q", got)
+	// image caption / file name still fall back — /_search_around exposes
+	// media payloads (no payload-type whitelist), so the fallback path must
+	// keep producing a snippet for them.
+	if got := fallbackSnippet(&Payload{Image: &ImagePayload{Caption: "图说"}}); got != "图说" {
+		t.Fatalf("image caption: got %q", got)
 	}
-	if got := fallbackSnippet(&Payload{File: &FilePayload{Name: "a.pdf"}}); got != "" {
-		t.Fatalf("file name must not fall back post-whitelist, got %q", got)
+	if got := fallbackSnippet(&Payload{File: &FilePayload{Name: "a.pdf"}}); got != "a.pdf" {
+		t.Fatalf("file name: got %q", got)
 	}
 	// No textual projection (bare voice doc) or nil payload → empty, snippet omitted.
 	if got := fallbackSnippet(&Payload{Voice: &VoicePayload{}}); got != "" {

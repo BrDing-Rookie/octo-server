@@ -187,9 +187,11 @@ func searchSorters(sort string) []elastic.Sorter {
 
 // pickSnippet selects the most informative highlight fragment for a hit.
 // Priority follows A doc §2.1: text content first, then rich-text search-text,
-// then merge-forward child search-text. The /_search type whitelist [1,11,14]
-// (its only caller) never surfaces image/file docs, so those payload fields
-// are intentionally absent here. Returns "" when no field highlighted.
+// then merge-forward child search-text, then image caption, then file name.
+// The /_search type whitelist [1,11,14] never delivers image/file docs, but
+// /_search_around (no whitelist) does — keep those branches so an image/file
+// hit in the around window still surfaces a snippet. Returns "" when no field
+// highlighted.
 func pickSnippet(h map[string][]string) string {
 	if h == nil {
 		return ""
@@ -198,6 +200,8 @@ func pickSnippet(h map[string][]string) string {
 		"payload.text.content",
 		"payload.richText.searchText",
 		"payload.mergeForward.msgs.searchText",
+		"payload.image.caption",
+		"payload.file.name",
 	} {
 		if frags, ok := h[field]; ok && len(frags) > 0 && frags[0] != "" {
 			return frags[0]
@@ -219,11 +223,13 @@ const snippetWindow = 120
 // render, violating the A-doc §2.1 contract that every message hit carries
 // content.
 //
-// Field priority mirrors pickSnippet (text → rich-text → merge-forward child)
-// so the fallback and the highlighted path agree on which field represents the
-// message. image/file branches are intentionally omitted: the /_search type
-// whitelist [1,11,14] (the only caller) never delivers those payloads. Returns
-// "" only when the payload has no textual projection at all, leaving snippet
+// Field priority mirrors pickSnippet (text → rich-text → merge-forward child →
+// image caption → file name) so the fallback and the highlighted path agree on
+// which field represents the message. The /_search type whitelist [1,11,14]
+// never delivers image/file docs, but /_search_around (no whitelist) does, so
+// keeping the image/file branches preserves the snippet for media messages in
+// the around window. Returns "" only when the payload has no textual
+// projection at all (e.g. a bare voice/video doc), leaving snippet
 // omitted exactly as before.
 func fallbackSnippet(p *Payload) string {
 	if p == nil {
@@ -241,6 +247,12 @@ func fallbackSnippet(p *Payload) string {
 				return truncateRunes(m.SearchText, snippetWindow)
 			}
 		}
+	}
+	if p.Image != nil && p.Image.Caption != "" {
+		return truncateRunes(p.Image.Caption, snippetWindow)
+	}
+	if p.File != nil && p.File.Name != "" {
+		return truncateRunes(p.File.Name, snippetWindow)
 	}
 	return ""
 }
