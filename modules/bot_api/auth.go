@@ -62,8 +62,9 @@ func (ba *BotAPI) authUserBot(c *wkhttp.Context, token string) {
 }
 
 // authAppBot authenticates an App Bot.
-// Primary path: O(1) in-memory Registry lookup (design doc §4.1).
-// Fallback: DB query (covers startup race where registry not yet loaded).
+// Primary path: O(1) shared registry/cache lookup (design doc §4.1).
+// Fallback: DB query (covers a cache miss/error or a startup race where the
+// registry is not yet loaded); the DB row + status==1 gate stays authoritative.
 func (ba *BotAPI) authAppBot(c *wkhttp.Context, token string) {
 	// Try in-memory Registry first (O(1))
 	if spec := ba.lookupAppBotRegistry(token); spec != nil {
@@ -95,6 +96,30 @@ func (ba *BotAPI) authAppBot(c *wkhttp.Context, token string) {
 		return
 	}
 
+	// Write-through WARM the shared cache after an authoritative DB hit so
+	// subsequent auths for this (valid, published) token are served from cache.
+	//
+	// Warm (not Add) is deliberate and load-bearing: it is a best-effort SETNX that
+	// only fills an ABSENT key. A concurrent revoke writes a tombstone, which Warm
+	// won't overwrite (and FindByToken denies), so a warm-up that read the DB as
+	// valid just before a concurrent delete/unpublish can NOT resurrect the
+	// just-revoked key — closing the cross-replica repopulate race.
+	//
+	// FIRE-AND-FORGET: running it inline would block every DB-fallback auth on a
+	// Redis write — and when Redis is degraded (the exact case driving the
+	// fallback), that adds the client's write-timeout to each request. The DB lookup
+	// already produced the authoritative answer this request needs, so the warm-up
+	// runs in the background. It can't pile up under a sustained outage either:
+	// RedisAppBotRegistry.Warm drops the write while its circuit is open.
+	if reg := GetAppBotRegistry(); reg != nil {
+		spec := &AppBotRegistrySpec{
+			UID:     appBot.UID,
+			Scope:   appBot.Scope,
+			SpaceID: appBot.SpaceID,
+		}
+		go reg.Warm(token, spec)
+	}
+
 	c.Set(CtxKeyRobotID, appBot.UID)
 	c.Set(CtxKeyBotKind, BotKindApp)
 	c.Set(CtxKeyAppBotScope, appBot.Scope)
@@ -104,8 +129,9 @@ func (ba *BotAPI) authAppBot(c *wkhttp.Context, token string) {
 	c.Next()
 }
 
-// lookupAppBotRegistry queries the global App Bot Registry (O(1) memory lookup).
-// Returns nil if registry not initialized or token not found.
+// lookupAppBotRegistry queries the global App Bot registry (O(1) shared
+// registry/cache lookup). Returns nil if the registry is not initialized or the
+// token is not found (a miss/error falls through to the authoritative DB lookup).
 func (ba *BotAPI) lookupAppBotRegistry(token string) *AppBotRegistrySpec {
 	reg := GetAppBotRegistry()
 	if reg == nil {

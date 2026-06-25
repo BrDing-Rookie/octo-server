@@ -12,26 +12,54 @@ type AppBotRegistrySpec struct {
 	SpaceID string
 }
 
-// AppBotRegistryInterface is the interface for App Bot in-memory registry lookup.
+// AppBotRegistryInterface is the App Bot auth registry: a token -> spec lookup
+// plus the mutators the app_bot admin handlers call on publish/rotate/unpublish/
+// delete. Two implementations satisfy it: AppBotRegistryAdapter (in-memory,
+// single-process — used by unit tests) and RedisAppBotRegistry (shared write-
+// through cache — used in production so revocations propagate across replicas;
+// see issue #309).
+//
+// FindByToken returns nil on a miss AND on any backend error, so the caller
+// (authAppBot) falls through to the authoritative DB lookup — auth must fail
+// safe, never serve a stale spec when the backend is degraded.
 type AppBotRegistryInterface interface {
 	FindByToken(token string) *AppBotRegistrySpec
+	// Add is an AUTHORITATIVE write (publish / rotate-new): it must establish the
+	// spec, overwriting any prior value (e.g. a revocation tombstone on re-publish).
+	Add(token string, spec *AppBotRegistrySpec)
+	// Warm is a BEST-EFFORT, NON-BLOCKING/BOUNDED warm-up (auth-path repopulate +
+	// startup load). It must never overwrite a concurrent revocation, and callers
+	// may invoke it from a detached goroutine on the hot path — implementations
+	// must keep it bounded (never an unbounded blocking write per call).
+	Warm(token string, spec *AppBotRegistrySpec)
+	Remove(token string)
+	Update(oldToken, newToken string, spec *AppBotRegistrySpec)
 }
 
-// appBotRegistryValue stores AppBotRegistryInterface, set by the app_bot module on init.
-var appBotRegistryValue atomic.Value
+// regHolder wraps the registry interface so the global can be stored through an
+// atomic.Pointer of a single concrete type. Using atomic.Value directly would
+// type-lock the slot to the first concrete implementation stored and panic if a
+// later Store used a different one (or nil) — which a test that swaps the
+// registry and then restores the previous (possibly nil) value needs to do.
+type regHolder struct{ r AppBotRegistryInterface }
+
+// appBotRegistry stores the global App Bot registry, set by the app_bot module
+// on init. Lock-free reads on the bot-auth hot path; Store(nil-holder safe).
+var appBotRegistry atomic.Pointer[regHolder]
 
 // SetAppBotRegistry sets the global App Bot registry (called by app_bot module).
+// A nil r is allowed (clears the slot back to "no registry").
 func SetAppBotRegistry(r AppBotRegistryInterface) {
-	appBotRegistryValue.Store(r)
+	appBotRegistry.Store(&regHolder{r: r})
 }
 
-// GetAppBotRegistry returns the global App Bot registry.
+// GetAppBotRegistry returns the global App Bot registry, or nil if unset/cleared.
 func GetAppBotRegistry() AppBotRegistryInterface {
-	v := appBotRegistryValue.Load()
-	if v == nil {
+	h := appBotRegistry.Load()
+	if h == nil {
 		return nil
 	}
-	return v.(AppBotRegistryInterface)
+	return h.r
 }
 
 // AppBotRegistryAdapter adapts an external registry to AppBotRegistryInterface.
@@ -60,6 +88,13 @@ func (a *AppBotRegistryAdapter) Add(token string, spec *AppBotRegistrySpec) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.byToken[token] = spec
+}
+
+// Warm mirrors Add for the in-memory adapter: it is single-process, so the
+// tombstone / SETNX semantics the shared Redis registry needs to close the
+// cross-replica resurrection race don't apply here.
+func (a *AppBotRegistryAdapter) Warm(token string, spec *AppBotRegistrySpec) {
+	a.Add(token, spec)
 }
 
 // Remove removes a spec by token.
