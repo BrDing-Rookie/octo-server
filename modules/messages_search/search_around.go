@@ -239,6 +239,7 @@ func buildAnchorDSL(req SearchAroundReq, normChannelID, spaceID string, anchorID
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	b.MustNot(elastic.NewTermQuery("revoked", true))
 	applySystemMessageHardFilter(b)
+	applyExcludeVirtual(b)
 	return b
 }
 
@@ -253,6 +254,7 @@ func buildAroundDSL(req SearchAroundReq, normChannelID, spaceID string) elastic.
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)
 	applySystemMessageHardFilter(b)
+	applyExcludeVirtual(b)
 	return b
 }
 

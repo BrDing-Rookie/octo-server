@@ -224,6 +224,92 @@ func TestUnmarshalDoc_File(t *testing.T) {
 	}
 }
 
+// TestUnmarshalDoc_RichText covers the indexer's payload.richText shape: a
+// payload.type=14 doc carrying the plain-text projection in
+// payload.richText.searchText.
+func TestUnmarshalDoc_RichText(t *testing.T) {
+	src := `{"messageId":1,"messageSeq":1,"channelId":"g","timestamp":100,"payload":{"type":14,"richText":{"searchText":"标题 正文 图片说明"}}}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Payload.RichText == nil {
+		t.Fatalf("richText payload must be populated")
+	}
+	if got := doc.Payload.RichText.SearchText; got != "标题 正文 图片说明" {
+		t.Fatalf("searchText: got %q", got)
+	}
+	if payloadType(doc.Payload) != payloadTypeRichText {
+		t.Fatalf("payloadType: got %d", payloadType(doc.Payload))
+	}
+}
+
+// TestUnmarshalDoc_VirtualSubDoc covers the Part B virtual sub-document shape
+// (richtext-virtual-docs-octo-server-dev.md §1): a rich-text-derived child
+// carrying `virtual=true` + `parentMessageId` alongside the usual image/file
+// payload. Both fields are reader-internal — they drive the must_not filter
+// and the visibility coalesce, never the JSON response.
+func TestUnmarshalDoc_VirtualSubDoc(t *testing.T) {
+	src := `{
+	  "messageId": 7777,
+	  "messageSeq": 99,
+	  "channelId": "g",
+	  "timestamp": 1717000000,
+	  "virtual": true,
+	  "parentMessageId": 7777,
+	  "payload": {"type": 2, "image": {"url": "http://x", "caption": "合同图片"}}
+	}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !doc.Virtual {
+		t.Fatalf("Virtual: want true, got false")
+	}
+	if doc.ParentMessageID == nil {
+		t.Fatalf("ParentMessageID: want non-nil pointer")
+	}
+	if *doc.ParentMessageID != 7777 {
+		t.Fatalf("ParentMessageID: got %d, want 7777", *doc.ParentMessageID)
+	}
+}
+
+// TestUnmarshalDoc_PlainDocOmitsVirtual: a legacy / non-virtual doc must
+// deserialise to Virtual=false and ParentMessageID=nil so the visibility
+// coalesce keeps the existing behaviour (visKey = own messageId) and the
+// text-search must_not filter still admits it.
+func TestUnmarshalDoc_PlainDocOmitsVirtual(t *testing.T) {
+	src := `{"messageId":1,"messageSeq":1,"channelId":"g","timestamp":100,"payload":{"type":1,"text":{"content":"hi"}}}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Virtual {
+		t.Fatalf("Virtual must default to false on plain doc")
+	}
+	if doc.ParentMessageID != nil {
+		t.Fatalf("ParentMessageID must be nil on plain doc; got %v", *doc.ParentMessageID)
+	}
+}
+
+// TestMarshalDoc_PlainDocOmitsNewFieldsOnWire: a plain Doc (Virtual=false,
+// ParentMessageID=nil) must marshal byte-identical to its pre-Part-B form —
+// the new fields are tagged `omitempty` so neither key surfaces. Guards
+// against accidentally widening the OS-facing JSON contract.
+func TestMarshalDoc_PlainDocOmitsNewFieldsOnWire(t *testing.T) {
+	d := Doc{MessageID: 1, MessageSeq: 1, ChannelID: "g", Timestamp: 100}
+	out, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(out)
+	for _, k := range []string{`"virtual"`, `"parentMessageId"`} {
+		if strings.Contains(wire, k) {
+			t.Errorf("plain-doc wire form must omit %s; got %s", k, wire)
+		}
+	}
+}
+
 func TestClassifyKind_Forward(t *testing.T) {
 	p := &Payload{MergeForward: &MergeForwardPayload{ChildCount: 3}}
 	if got := classifyKind(p); got != "forward" {
@@ -245,6 +331,28 @@ func TestClassifyKind_Text(t *testing.T) {
 	p = &Payload{Type: &tp, Image: &ImagePayload{}}
 	if got := classifyKind(p); got != "text" {
 		t.Fatalf("image folds to text: got %q", got)
+	}
+}
+
+// Rich-text is folded into "text" — we deliberately don't expose a "richtext"
+// kind on the wire (the swagger enum is ["text","forward"]), so the client
+// keeps a stable two-value contract and renders richText via the existing
+// text path. Forward still wins when both shapes are present.
+func TestClassifyKind_RichTextFoldsIntoText(t *testing.T) {
+	tp := payloadTypeRichText
+	p := &Payload{Type: &tp, RichText: &RichTextPayload{SearchText: "hi"}}
+	if got := classifyKind(p); got != "text" {
+		t.Fatalf("richtext must fold into text: got %q", got)
+	}
+	// Forward wins over richtext (impossible in practice, but the priority is
+	// part of the contract).
+	p2 := &Payload{
+		Type:         &tp,
+		RichText:     &RichTextPayload{SearchText: "hi"},
+		MergeForward: &MergeForwardPayload{ChildCount: 1},
+	}
+	if got := classifyKind(p2); got != "forward" {
+		t.Fatalf("forward must beat richtext: got %q", got)
 	}
 }
 
@@ -279,11 +387,34 @@ func TestPickSnippet(t *testing.T) {
 	if got := pickSnippet(hl); !strings.Contains(got, "world") {
 		t.Fatalf("priority: text content should win, got %q", got)
 	}
+	// image/file fields stay in the priority list — /_search_around (no
+	// payload-type whitelist) routes hits through the same snippet picker, so
+	// a media-only hit must still surface caption / filename rather than be
+	// blanked out. /_search applies its [1,11,14] whitelist upstream of this
+	// function, so the extra branches do not affect that path.
 	if got := pickSnippet(map[string][]string{"payload.file.name": {"x"}}); got != "x" {
 		t.Fatalf("file fallback: got %q", got)
 	}
+	if got := pickSnippet(map[string][]string{"payload.image.caption": {"y"}}); got != "y" {
+		t.Fatalf("image fallback: got %q", got)
+	}
 	if got := pickSnippet(nil); got != "" {
 		t.Fatalf("empty: got %q", got)
+	}
+	// RichText sits between text.content and mergeForward in priority: when
+	// only richText highlighted (no plain text matched) it must win.
+	if got := pickSnippet(map[string][]string{
+		"payload.richText.searchText":          {"<mark>标</mark>题"},
+		"payload.mergeForward.msgs.searchText": {"forward x"},
+	}); got != "<mark>标</mark>题" {
+		t.Fatalf("richText must beat mergeForward in priority, got %q", got)
+	}
+	// And text.content still beats richText.
+	if got := pickSnippet(map[string][]string{
+		"payload.text.content":        {"<mark>plain</mark>"},
+		"payload.richText.searchText": {"rt"},
+	}); got != "<mark>plain</mark>" {
+		t.Fatalf("text.content must beat richText, got %q", got)
 	}
 }
 
@@ -292,6 +423,12 @@ func TestFallbackSnippet(t *testing.T) {
 	if got := fallbackSnippet(&Payload{Type: &txt, Text: &TextPayload{Content: "群聊测试消息"}}); got != "群聊测试消息" {
 		t.Fatalf("text content: got %q", got)
 	}
+	// RichText fills in when text.content is absent (the empty-keyword
+	// browse path on a type=14 doc).
+	rt := payloadTypeRichText
+	if got := fallbackSnippet(&Payload{Type: &rt, RichText: &RichTextPayload{SearchText: "富文本预览"}}); got != "富文本预览" {
+		t.Fatalf("richText fallback: got %q", got)
+	}
 	// merge-forward: first non-empty child searchText wins.
 	mf := &Payload{MergeForward: &MergeForwardPayload{Msgs: []MergeForwardMsg{
 		{SearchText: ""}, {SearchText: "转发预览"},
@@ -299,6 +436,9 @@ func TestFallbackSnippet(t *testing.T) {
 	if got := fallbackSnippet(mf); got != "转发预览" {
 		t.Fatalf("merge-forward: got %q", got)
 	}
+	// image caption / file name still fall back — /_search_around exposes
+	// media payloads (no payload-type whitelist), so the fallback path must
+	// keep producing a snippet for them.
 	if got := fallbackSnippet(&Payload{Image: &ImagePayload{Caption: "图说"}}); got != "图说" {
 		t.Fatalf("image caption: got %q", got)
 	}

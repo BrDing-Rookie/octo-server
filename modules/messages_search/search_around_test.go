@@ -77,6 +77,41 @@ func TestSplitAroundWindow_NoBefore(t *testing.T) {
 	}
 }
 
+// Regression for the /_search_around media-snippet path: the around window has
+// no payload-type whitelist, so image (type=2) and file (type=8) docs surface
+// in the wings. singleMessageHit must still produce a non-empty snippet for
+// them via the fallback chain (image.caption / file.name) — otherwise the
+// client renders a blank row. Pins the behaviour that was lost when the
+// image/file branches were briefly dropped from pickSnippet/fallbackSnippet.
+func TestSingleMessageHit_AroundMediaSnippetNonEmpty(t *testing.T) {
+	h := &Handler{cfg: SearchConfig{}}
+	img := payloadTypeImage
+	imgDoc := Doc{
+		MessageID: 101,
+		From:      "u1",
+		Payload: &Payload{
+			Type:  &img,
+			Image: &ImagePayload{Caption: "野餐合影"},
+		},
+	}
+	if got := h.singleMessageHit(imgDoc, "C1", nil).Snippet; got != "野餐合影" {
+		t.Fatalf("image hit must carry caption snippet in /_search_around, got %q", got)
+	}
+
+	file := payloadTypeFile
+	fileDoc := Doc{
+		MessageID: 102,
+		From:      "u1",
+		Payload: &Payload{
+			Type: &file,
+			File: &FilePayload{Name: "season-plan.pdf"},
+		},
+	}
+	if got := h.singleMessageHit(fileDoc, "C1", nil).Snippet; got != "season-plan.pdf" {
+		t.Fatalf("file hit must carry filename snippet in /_search_around, got %q", got)
+	}
+}
+
 // buildAroundDSL must carry the spaceId term for p2p (so a cross-Space window
 // can't be assembled) and exclude cmd messages; it must NOT carry a keyword.
 func TestBuildAroundDSL_P2PSpaceScoped(t *testing.T) {
@@ -99,6 +134,19 @@ func TestBuildAroundDSL_GroupNoSpaceTerm(t *testing.T) {
 	}))
 	if strings.Contains(body, "spaceId") {
 		t.Fatalf("group around DSL must NOT carry spaceId term, got:\n%s", body)
+	}
+}
+
+// V8-b adjacent — the around window DSL must also carry the Part-B virtual
+// pre-wire so a future virtual media/file sub-document cannot surface as a
+// standalone message in the chronological window.
+func TestBuildAroundDSL_ExcludesVirtual(t *testing.T) {
+	req := SearchAroundReq{ChannelType: channelTypeGroup, ChannelID: "G1"}
+	body := asJSONString(t, buildAroundDSL(req, "G1", "").(interface {
+		Source() (any, error)
+	}))
+	if !strings.Contains(body, `"virtual":true`) {
+		t.Fatalf("around DSL must exclude virtual sub-documents, got:\n%s", body)
 	}
 }
 
@@ -156,6 +204,9 @@ func TestBuildAnchorDSL_ExcludesCmdAndRevoked(t *testing.T) {
 	}
 	if !strings.Contains(body, `"revoked":true`) {
 		t.Fatalf("anchor DSL must exclude revoked docs, got:\n%s", body)
+	}
+	if !strings.Contains(body, `"virtual":true`) {
+		t.Fatalf("anchor DSL must exclude virtual sub-documents (Part B pre-wire), got:\n%s", body)
 	}
 }
 

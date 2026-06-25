@@ -146,8 +146,7 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	if req.Keyword != "" {
 		clause, err := buildKeywordClauseGated(ctx, analyzer, stopwordStripEnabled, req.Keyword,
 			"payload.text.content^3",
-			"payload.image.caption", "payload.image.name",
-			"payload.file.caption", "payload.file.name",
+			"payload.richText.searchText^3",
 			"payload.mergeForward.msgs.searchText",
 		)
 		b.Must(clause)
@@ -155,22 +154,37 @@ func buildSearchMessagesDSL(ctx context.Context, analyzer tokenAnalyzer, stopwor
 	}
 	applyChannelAndRevoked(b, normChannelID)
 	applySpaceIDScope(b, req.ChannelType, spaceID)
+	// Whitelist text (1), mergeForward (11), and richText (14). Media
+	// (image/video/voice/gif) and file payloads are reachable through the
+	// dedicated /_search_media and /_search_files surfaces — surfacing them
+	// on the legacy /_search response was confusing the client UI which can
+	// only render text/richText/mergeForward snippets. Sibling endpoints
+	// already use the same `terms` shape: /_search_all → [1,8,11,14],
+	// /_search_media → [2,5], /_search_files → [8].
+	b.Filter(elastic.NewTermsQuery("payload.type",
+		payloadTypeText,
+		payloadTypeMergeForward,
+		payloadTypeRichText,
+	))
 	addCommonFilters(b, req.Filters)
 	applySystemMessageHardFilter(b)
+	applyExcludeVirtual(b)
 	return b, analyzeErr
 }
 
 // buildSearchMessagesHighlight returns the standard highlight config for
 // /_search responses. Each match returns at most one 120-char fragment.
+// Fields mirror the keyword multi_match clause (text / richText / mergeForward)
+// — image.caption + file.name are excluded because the endpoint's type
+// whitelist [1,11,14] never reaches them.
 func buildSearchMessagesHighlight() *elastic.Highlight {
 	return elastic.NewHighlight().
 		PreTags("<mark>").PostTags("</mark>").
 		FragmentSize(120).
 		NumOfFragments(1).
 		Field("payload.text.content").
-		Field("payload.mergeForward.msgs.searchText").
-		Field("payload.image.caption").
-		Field("payload.file.name")
+		Field("payload.richText.searchText").
+		Field("payload.mergeForward.msgs.searchText")
 }
 
 // buildMessageHits maps the OS hits into the API response shape and joins

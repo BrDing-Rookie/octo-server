@@ -9,8 +9,8 @@ import (
 )
 
 // cursorPayload is the search-after key serialised inside an opaque cursor.
-// Score is set only for `relevance` sort, where OS sorts by 3 keys
-// (timestamp, _score, messageId) and search_after must echo all three.
+// Score is set only for `relevance` sort, where OS sorts by 4 keys
+// (timestamp, _score, messageId, subSeq) and search_after must echo all four.
 // `omitempty` keeps time_desc / time_asc cursors byte-identical to the
 // pre-relevance-fix encoding, so already-issued cursors decode unchanged.
 type cursorPayload struct {
@@ -24,6 +24,24 @@ type cursorPayload struct {
 	// (YUJ-4667 step 4 / V7 depth cap). omitempty keeps pre-depth cursors
 	// (Depth==0 first page) byte-identical to the old encoding.
 	Depth int64 `json:"d,omitempty"`
+	// SubSeq is the Part B sort tiebreaker for virtual sub-documents that
+	// share (timestamp, messageId) with their rich-text parent (see
+	// docs/messages-search/richtext-virtual-docs-cursor-tiebreaker-for-indexer.md).
+	// Plain docs / parent docs encode 0; virtual children encode their
+	// 1-based block index. omitempty keeps pre-Part-B cursors byte-identical
+	// to the old encoding — a pre-Part-B cursor decodes to SubSeq=0, which
+	// matches the plain-doc convention. Effect on same-(ts,msgID) virtual
+	// children under exclusive search_after is sort-direction dependent:
+	//   - time_asc:  search_after=[..,0] resumes BEFORE subSeq>=1, so children
+	//                still surface on the next page (not skipped).
+	//   - time_desc / relevance (DESC): search_after=[..,0] resumes after
+	//                subSeq=0 descending, so same-(ts,msgID) children at
+	//                subSeq>=1 are skipped.
+	// Acceptable either way: legacy cursors only exist within the brief
+	// deploy-transition window, and the next fresh query (with a Part-B cursor)
+	// self-heals — the results match pre-Part-B behaviour, just missing the
+	// newly-added virtual docs during the transition.
+	SubSeq int `json:"q,omitempty"`
 }
 
 // maxPaginationDepth caps the cumulative number of results a single
@@ -47,20 +65,21 @@ var hmacKeyFn = func(cfg SearchConfig) []byte {
 	return []byte(cfg.CursorHMAC)
 }
 
-// encodeCursor packs (timestamp, messageId, score?) into a base64url-encoded
-// opaque cursor with an 8-byte HMAC tail. Pass score=nil for time_desc /
-// time_asc; pass a non-nil pointer for relevance sort. Depth defaults to 0
-// (the cumulative-depth cap treats a depth-less cursor as a fresh walk); use
-// encodeCursorWithDepth to carry the running total.
-func encodeCursor(cfg SearchConfig, ts, msgID int64, score *float64) string {
-	return encodeCursorWithDepth(cfg, ts, msgID, score, 0)
+// encodeCursor packs (timestamp, messageId, score?, subSeq) into a
+// base64url-encoded opaque cursor with an 8-byte HMAC tail. Pass score=nil
+// for time_desc / time_asc; pass a non-nil pointer for relevance sort. Pass
+// subSeq=0 for plain / parent docs; >0 for Part B virtual children. Depth
+// defaults to 0 (the cumulative-depth cap treats a depth-less cursor as a
+// fresh walk); use encodeCursorWithDepth to carry the running total.
+func encodeCursor(cfg SearchConfig, ts, msgID int64, score *float64, subSeq int) string {
+	return encodeCursorWithDepth(cfg, ts, msgID, score, subSeq, 0)
 }
 
 // encodeCursorWithDepth is encodeCursor plus the cumulative result-depth the
 // next page will start from. The depth is HMAC-signed along with the rest of
 // the payload so a client cannot tamper it back to 0 to bypass the cap.
-func encodeCursorWithDepth(cfg SearchConfig, ts, msgID int64, score *float64, depth int64) string {
-	p := cursorPayload{TS: ts, MsgID: msgID, Score: score, Depth: depth}
+func encodeCursorWithDepth(cfg SearchConfig, ts, msgID int64, score *float64, subSeq int, depth int64) string {
+	p := cursorPayload{TS: ts, MsgID: msgID, Score: score, Depth: depth, SubSeq: subSeq}
 	body, _ := json.Marshal(p)
 	mac := hmac.New(sha256.New, hmacKeyFn(cfg))
 	mac.Write(body)
@@ -72,30 +91,32 @@ func encodeCursorWithDepth(cfg SearchConfig, ts, msgID int64, score *float64, de
 // signature failure surfaces as a single "malformed cursor" error so the
 // handler can map to VALIDATION_ERROR(field=cursor). The returned score is
 // nil for legacy 2-tuple cursors (time_*) and non-nil for relevance cursors.
-func decodeCursor(cfg SearchConfig, s string) (int64, int64, *float64, error) {
-	ts, msgID, score, _, err := decodeCursorWithDepth(cfg, s)
-	return ts, msgID, score, err
+// The returned subSeq is 0 for pre-Part-B cursors (field absent in the
+// payload).
+func decodeCursor(cfg SearchConfig, s string) (int64, int64, *float64, int, error) {
+	ts, msgID, score, _, subSeq, err := decodeCursorWithDepth(cfg, s)
+	return ts, msgID, score, subSeq, err
 }
 
 // decodeCursorWithDepth is decodeCursor plus the cumulative depth carried in
 // the cursor (0 for legacy cursors that predate the field).
-func decodeCursorWithDepth(cfg SearchConfig, s string) (int64, int64, *float64, int64, error) {
+func decodeCursorWithDepth(cfg SearchConfig, s string) (int64, int64, *float64, int64, int, error) {
 	if s == "" {
-		return 0, 0, nil, 0, errors.New("cursor: empty")
+		return 0, 0, nil, 0, 0, errors.New("cursor: empty")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil || len(raw) < cursorSigLen+1 {
-		return 0, 0, nil, 0, errors.New("cursor: malformed")
+		return 0, 0, nil, 0, 0, errors.New("cursor: malformed")
 	}
 	body, sig := raw[:len(raw)-cursorSigLen], raw[len(raw)-cursorSigLen:]
 	mac := hmac.New(sha256.New, hmacKeyFn(cfg))
 	mac.Write(body)
 	if !hmac.Equal(mac.Sum(nil)[:cursorSigLen], sig) {
-		return 0, 0, nil, 0, errors.New("cursor: bad signature")
+		return 0, 0, nil, 0, 0, errors.New("cursor: bad signature")
 	}
 	var p cursorPayload
 	if err := json.Unmarshal(body, &p); err != nil {
-		return 0, 0, nil, 0, errors.New("cursor: unmarshal")
+		return 0, 0, nil, 0, 0, errors.New("cursor: unmarshal")
 	}
-	return p.TS, p.MsgID, p.Score, p.Depth, nil
+	return p.TS, p.MsgID, p.Score, p.Depth, p.SubSeq, nil
 }

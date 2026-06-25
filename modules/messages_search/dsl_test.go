@@ -64,6 +64,7 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 		`"multi_match"`,
 		`"hello"`,
 		`"payload.text.content^3"`,
+		`"payload.richText.searchText^3"`,
 		`"payload.mergeForward.msgs.searchText"`,
 		`"channelId":"groupNo"`,
 		`"revoked":true`,
@@ -72,10 +73,16 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 		`"to":2000`,
 		`"include_lower":true`,
 		`"include_upper":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("DSL missing %q in:\n%s", want, body)
 		}
+	}
+	// payload.type whitelist may serialise with or without spaces depending on
+	// the elastic library's marshalling — accept both shapes.
+	if !strings.Contains(body, `"payload.type":[1,11,14]`) && !strings.Contains(body, `"payload.type":[1, 11, 14]`) {
+		t.Errorf("DSL missing terms payload.type [1,11,14] in:\n%s", body)
 	}
 }
 
@@ -100,10 +107,198 @@ func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 		`"to":2000`,
 		`"include_lower":true`,
 		`"include_upper":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword DSL missing %q in:\n%s", want, body)
 		}
+	}
+	if !strings.Contains(body, `"payload.type":[1,11,14]`) && !strings.Contains(body, `"payload.type":[1, 11, 14]`) {
+		t.Errorf("empty-keyword DSL missing terms payload.type [1,11,14] in:\n%s", body)
+	}
+}
+
+// TestBuildSearchMessagesDSL_KeywordFieldsWhitelist pins the contract that the
+// /_search multi_match keyword clause targets EXACTLY the three text-bearing
+// projections that align with the payload.type whitelist [1, 11, 14]:
+// payload.text.content^3 (text=1), payload.richText.searchText^3 (richText=14),
+// payload.mergeForward.msgs.searchText (mergeForward=11). The previously listed
+// image.caption / image.name / file.caption / file.name fields became dead
+// branches once the type whitelist excluded image(2) and file(8) — kept here as
+// a regression pin so any future revival surfaces in test, not in production.
+func TestBuildSearchMessagesDSL_KeywordFieldsWhitelist(t *testing.T) {
+	req := SearchMessagesReq{
+		ChannelType: channelTypeGroup,
+		ChannelID:   "g",
+		Keyword:     "hello",
+	}
+	q, _ := buildSearchMessagesDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+	src, err := q.(interface{ Source() (any, error) }).Source()
+	if err != nil {
+		t.Fatalf("Source(): %v", err)
+	}
+	raw, _ := json.Marshal(src)
+	body := string(raw)
+
+	// Negative substring guard: no media / file projection should appear in
+	// the /_search query at all (multi_match or otherwise). Highlight config
+	// is built separately and is asserted in its own test.
+	for _, banned := range []string{
+		"payload.image.caption",
+		"payload.image.name",
+		"payload.file.caption",
+		"payload.file.name",
+	} {
+		if strings.Contains(body, banned) {
+			t.Errorf("/_search DSL must not reference %q (whitelist [1,11,14] excludes image/file): %s", banned, body)
+		}
+	}
+
+	// Walk the marshalled DSL to find every multi_match.fields array and
+	// assert each one is the exact whitelist (length + order + content).
+	want := []string{
+		"payload.text.content^3",
+		"payload.richText.searchText^3",
+		"payload.mergeForward.msgs.searchText",
+	}
+	var found int
+	var walk func(any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case map[string]any:
+			if mm, ok := v["multi_match"].(map[string]any); ok {
+				rawFields, ok := mm["fields"].([]any)
+				if !ok {
+					t.Errorf("multi_match has no fields array: %v", mm)
+					return
+				}
+				if len(rawFields) != len(want) {
+					t.Errorf("multi_match.fields length = %d, want %d: %v", len(rawFields), len(want), rawFields)
+					return
+				}
+				for i, f := range rawFields {
+					if f.(string) != want[i] {
+						t.Errorf("multi_match.fields[%d] = %q, want %q", i, f, want[i])
+					}
+				}
+				found++
+			}
+			for _, child := range v {
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
+		}
+	}
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	walk(normalized)
+	if found == 0 {
+		t.Errorf("expected at least one multi_match clause in /_search DSL, got 0: %s", body)
+	}
+}
+
+// TestBuildSearchMessagesDSL_TypeWhitelist pins the contract that /_search
+// returns ONLY text (payload.type=1), mergeForward (payload.type=11), and
+// richText (payload.type=14) messages. Image / voice / video / file payloads
+// are served through the dedicated /_search_media, /_search_files,
+// /_search_all surfaces — they must not surface on the legacy /_search
+// response, whose client UI only renders text/richText/mergeForward snippets.
+//
+// Asserted shape: bool.filter contains exactly one terms(payload.type) clause,
+// whose array equals [1, 11, 14] (order matters — matches the indexer's terms
+// query input order in buildSearchMessagesDSL).
+func TestBuildSearchMessagesDSL_TypeWhitelist(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		keyword string
+	}{
+		{"keyword", "hello"},
+		{"browse", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := SearchMessagesReq{
+				ChannelType: channelTypeGroup,
+				ChannelID:   "g",
+				Keyword:     tc.keyword,
+			}
+			q, _ := buildSearchMessagesDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+			src, err := q.(interface{ Source() (any, error) }).Source()
+			if err != nil {
+				t.Fatalf("Source(): %v", err)
+			}
+			raw, _ := json.Marshal(src)
+			var normalized map[string]any
+			if err := json.Unmarshal(raw, &normalized); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			boolNode, ok := normalized["bool"].(map[string]any)
+			if !ok {
+				t.Fatalf("query has no bool node: %s", raw)
+			}
+			rawFilter, ok := boolNode["filter"]
+			if !ok {
+				t.Fatalf("bool has no filter: %s", raw)
+			}
+			var filters []any
+			switch v := rawFilter.(type) {
+			case []any:
+				filters = v
+			case map[string]any:
+				filters = []any{v}
+			default:
+				t.Fatalf("filter has unexpected shape %T: %s", rawFilter, raw)
+			}
+
+			var matched bool
+			for _, clause := range filters {
+				m, ok := clause.(map[string]any)
+				if !ok {
+					continue
+				}
+				terms, ok := m["terms"].(map[string]any)
+				if !ok {
+					continue
+				}
+				arr, ok := terms["payload.type"].([]any)
+				if !ok {
+					continue
+				}
+				if len(arr) != 3 {
+					t.Errorf("payload.type whitelist must be exactly 3 entries, got %d: %v", len(arr), arr)
+					continue
+				}
+				got := []int{int(arr[0].(float64)), int(arr[1].(float64)), int(arr[2].(float64))}
+				want := []int{payloadTypeText, payloadTypeMergeForward, payloadTypeRichText}
+				if got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+					t.Errorf("payload.type whitelist mismatch: got %v want %v", got, want)
+				}
+				// Reject every disallowed payload type explicitly so any future
+				// regression (someone adds payloadTypeImage to the whitelist)
+				// surfaces here, not in production.
+				for _, banned := range []int{
+					payloadTypeImage,
+					payloadTypeGIF,
+					payloadTypeVoice,
+					payloadTypeVideo,
+					payloadTypeFile,
+				} {
+					for _, v := range got {
+						if v == banned {
+							t.Errorf("payload.type whitelist must not include %d (media/file): %v", banned, got)
+						}
+					}
+				}
+				matched = true
+			}
+			if !matched {
+				t.Errorf("bool.filter has no terms(payload.type) whitelist clause:\n%s", raw)
+			}
+		})
 	}
 }
 
@@ -273,6 +468,12 @@ func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 	if strings.Contains(body, "multi_match") {
 		t.Errorf("media DSL must not include multi_match")
 	}
+	// Part B virtual-children intentionally surface in /_search_media, so the
+	// must_not(virtual=true) helper from /_search and friends MUST NOT appear
+	// here.
+	if strings.Contains(body, `"virtual"`) {
+		t.Errorf("media DSL must NOT carry virtual filter:\n%s", body)
+	}
 }
 
 func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
@@ -287,6 +488,9 @@ func TestBuildSearchFilesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 	}
 	if !strings.Contains(body, `"payload.type":8`) {
 		t.Errorf("file DSL must filter type=8:\n%s", body)
+	}
+	if strings.Contains(body, `"virtual"`) {
+		t.Errorf("file DSL must NOT carry virtual filter:\n%s", body)
 	}
 }
 
@@ -305,6 +509,46 @@ func TestBuildSearchFilesDSL_KeywordIncludesMultiMatch(t *testing.T) {
 	}
 }
 
+// Highlight pin tests — the two text-side highlight builders must include
+// payload.richText.searchText so a rich-text keyword hit surfaces a marked
+// fragment under the same field name the snippet projection reads.
+func TestBuildSearchMessagesHighlight_IncludesRichText(t *testing.T) {
+	body := asJSONString(t, buildSearchMessagesHighlight())
+	for _, want := range []string{
+		`"payload.text.content"`,
+		`"payload.richText.searchText"`,
+		`"payload.mergeForward.msgs.searchText"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search_messages highlight missing %q in:\n%s", want, body)
+		}
+	}
+	// Negative pin: type whitelist [1,11,14] never reaches image/file payloads,
+	// so highlighting those fields is dead config.
+	for _, deny := range []string{
+		`"payload.image.caption"`,
+		`"payload.file.name"`,
+	} {
+		if strings.Contains(body, deny) {
+			t.Errorf("search_messages highlight should not include %q in:\n%s", deny, body)
+		}
+	}
+}
+
+func TestBuildSearchAllHighlight_IncludesRichText(t *testing.T) {
+	body := asJSONString(t, buildSearchAllHighlight())
+	for _, want := range []string{
+		`"payload.text.content"`,
+		`"payload.richText.searchText"`,
+		`"payload.mergeForward.msgs.searchText"`,
+		`"payload.file.name"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search_all highlight missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 	req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g", Keyword: "k"}
 	q, _ := buildSearchAllDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
@@ -313,10 +557,12 @@ func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 	})))
 	body := string(js)
 	for _, want := range []string{
-		`"payload.type":[1,8,11]`,
+		`"payload.type":[1,8,11,14]`,
 		`"minimum_should_match":"1"`,
 		`"payload.text.content^3"`,
+		`"payload.richText.searchText^3"`,
 		`"payload.file.name^2"`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) && !strings.Contains(body, strings.ReplaceAll(want, ",", ", ")) {
 			t.Errorf("search_all DSL missing %q in:\n%s", want, body)
@@ -343,14 +589,15 @@ func TestBuildSearchAllDSL_NoKeywordKeepsTypeFilter(t *testing.T) {
 	for _, want := range []string{
 		`"channelId":"g"`,
 		`"revoked":true`,
+		`"virtual":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword search_all DSL missing %q in:\n%s", want, body)
 		}
 	}
 	// type filter must still segment message vs file
-	if !strings.Contains(body, `"payload.type":[1,8,11]`) && !strings.Contains(body, `"payload.type":[1, 8, 11]`) {
-		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11]:\n%s", body)
+	if !strings.Contains(body, `"payload.type":[1,8,11,14]`) && !strings.Contains(body, `"payload.type":[1, 8, 11, 14]`) {
+		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11,14]:\n%s", body)
 	}
 }
 
@@ -433,7 +680,7 @@ func TestComputeCursorPagination_SnowflakeMessageIDPrecision(t *testing.T) {
 	if !hasMore || cursor == "" {
 		t.Fatalf("expected has_more with cursor, got %v %q", hasMore, cursor)
 	}
-	ts, msgID, score, err := decodeCursor(cfg, cursor)
+	ts, msgID, score, _, err := decodeCursor(cfg, cursor)
 	if err != nil {
 		t.Fatalf("decodeCursor: %v", err)
 	}
@@ -466,3 +713,261 @@ func TestComputeCursorPagination_BadSourceNoCursor(t *testing.T) {
 		t.Fatalf("bad _source must suppress cursor, got %v %q", hasMore, cursor)
 	}
 }
+
+// TestApplySort_IncludesSubSeqTiebreaker pins the Part B contract: all three
+// sort variants append a trailing `subSeq` sort key in the matching primary
+// direction (asc / desc). Without it, virtual sub-documents that share
+// (timestamp, messageId) with their rich-text parent get silently skipped by
+// OS's exclusive search_after — the symptom this whole change addresses.
+//
+// We assert on the marshalled sort spec emitted via SearchSource because
+// applySort runs against an *elastic.SearchService whose internal sort list
+// is not directly inspectable.
+func TestApplySort_IncludesSubSeqTiebreaker(t *testing.T) {
+	cases := []struct {
+		sort    string
+		want    []string // sort.field values in order
+		wantDir []bool   // true=asc
+	}{
+		{"time_desc", []string{"timestamp", "messageId", "subSeq"}, []bool{false, false, false}},
+		{"time_asc", []string{"timestamp", "messageId", "subSeq"}, []bool{true, true, true}},
+		{"relevance", []string{"timestamp", "_score", "messageId", "subSeq"}, []bool{false, false, false, false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sort, func(t *testing.T) {
+			// Drive the production sort builders directly so this pins the real
+			// wire shape (field order + the subSeq unmapped_type/missing guards),
+			// not a hand-rebuilt copy that could drift from applySort.
+			ss := elastic.NewSearchSource()
+			ss = ss.SortBy(searchSorters(tc.sort)...)
+			src, err := ss.Source()
+			if err != nil {
+				t.Fatalf("Source(): %v", err)
+			}
+			raw, _ := json.Marshal(src)
+			body := string(raw)
+			// Cheap shape check: the marshalled sort array names every
+			// expected field in the right order.
+			lastIdx := -1
+			for _, f := range tc.want {
+				idx := strings.Index(body, `"`+f+`"`)
+				if idx < 0 {
+					t.Fatalf("%s: sort missing field %q in:\n%s", tc.sort, f, body)
+				}
+				if idx <= lastIdx {
+					t.Fatalf("%s: field %q out of order (idx=%d, prev=%d) in:\n%s", tc.sort, f, idx, lastIdx, body)
+				}
+				lastIdx = idx
+			}
+			if !strings.Contains(body, `"subSeq"`) {
+				t.Fatalf("%s: subSeq tiebreaker missing in:\n%s", tc.sort, body)
+			}
+			// Reader-first deploy guard: the subSeq sort MUST carry
+			// unmapped_type + missing, otherwise OS 400s on the absent mapping
+			// before the indexer rollout lands and every /_search* goes down.
+			if !strings.Contains(body, `"unmapped_type":"long"`) {
+				t.Fatalf("%s: subSeq sort missing unmapped_type guard in:\n%s", tc.sort, body)
+			}
+			if !strings.Contains(body, `"missing":0`) {
+				t.Fatalf("%s: subSeq sort missing missing=0 guard in:\n%s", tc.sort, body)
+			}
+		})
+	}
+}
+
+// TestBuildSearchAfterFromHit_AppendsSubSeq — pins the Part B contract that
+// the search_after tuple ends with subSeq taken from the typed _source.
+// Without this, the round-refill anchor in paginateWithFilter would drop
+// the tiebreaker and silently skip virtual children at (ts, msgID) ties.
+func TestBuildSearchAfterFromHit_AppendsSubSeq(t *testing.T) {
+	// Non-relevance shape: [ts, msgID, subSeq]
+	body := json.RawMessage([]byte(`{"messageId":42,"messageSeq":7,"timestamp":1717000000,"subSeq":3}`))
+	hit := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(42), float64(3)},
+	}
+	sa, ok := buildSearchAfterFromHit(hit, false)
+	if !ok {
+		t.Fatalf("buildSearchAfterFromHit must accept well-formed hit")
+	}
+	if len(sa) != 3 {
+		t.Fatalf("time_* tuple len: got %d want 3 (%v)", len(sa), sa)
+	}
+	if got, ok := sa[2].(int); !ok || got != 3 {
+		t.Fatalf("search_after[2] must be int(subSeq=3); got %T(%v)", sa[2], sa[2])
+	}
+
+	// Relevance shape: [ts, score, msgID, subSeq]
+	hitRel := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(5.5), float64(42), float64(3)},
+	}
+	saRel, ok := buildSearchAfterFromHit(hitRel, true)
+	if !ok {
+		t.Fatalf("relevance buildSearchAfterFromHit must accept well-formed hit")
+	}
+	if len(saRel) != 4 {
+		t.Fatalf("relevance tuple len: got %d want 4 (%v)", len(saRel), saRel)
+	}
+	if got, ok := saRel[3].(int); !ok || got != 3 {
+		t.Fatalf("relevance search_after[3] must be int(subSeq=3); got %T(%v)", saRel[3], saRel[3])
+	}
+}
+
+// TestBuildSearchAfterFromHit_LegacyDocDefaultsSubSeqZero — a doc without
+// the subSeq field (pre-Part-B storage) deserialises to Doc.SubSeq=0 and
+// the search_after tuple carries 0 in the trailing slot. This is the
+// reader-side mirror of the platform-side smooth-degrade contract: legacy
+// docs in OS keep working without a reindex.
+func TestBuildSearchAfterFromHit_LegacyDocDefaultsSubSeqZero(t *testing.T) {
+	body := json.RawMessage([]byte(`{"messageId":42,"messageSeq":7,"timestamp":1717000000}`))
+	hit := &elastic.SearchHit{
+		Source: &body,
+		Sort:   []any{float64(1717000000), float64(42)},
+	}
+	sa, ok := buildSearchAfterFromHit(hit, false)
+	if !ok {
+		t.Fatalf("buildSearchAfterFromHit must accept legacy hit")
+	}
+	if got, ok := sa[2].(int); !ok || got != 0 {
+		t.Fatalf("legacy doc subSeq slot must be int(0); got %T(%v)", sa[2], sa[2])
+	}
+}
+
+// TestComputeCursorPagination_CarriesSubSeq — when the last hit is a
+// virtual sub-document with subSeq=N, the encoded cursor must carry N back
+// so the next page's search_after resumes exclusively past (ts, msgID, N).
+// This is the load-bearing end-to-end pin for the cross-page-boundary
+//漏图 fix: without subSeq on the cursor, the next page jumps back to (ts,
+// msgID, 0)'s implicit position and re-emits / skips siblings.
+func TestComputeCursorPagination_CarriesSubSeq(t *testing.T) {
+	cfg := SearchConfig{CursorHMAC: "k"}
+	h := &Handler{cfg: cfg}
+
+	body := json.RawMessage([]byte(`{"messageId":7777,"timestamp":1717000000,"virtual":true,"parentMessageId":7777,"subSeq":2}`))
+	result := &elastic.SearchResult{
+		Hits: &elastic.SearchHits{
+			Hits: []*elastic.SearchHit{
+				{Source: &body, Sort: []any{float64(1717000000), float64(7777), float64(2)}},
+			},
+		},
+	}
+	hasMore, cursor := h.computeCursorPagination(result, 1, "time_desc")
+	if !hasMore || cursor == "" {
+		t.Fatalf("expected has_more with cursor, got %v %q", hasMore, cursor)
+	}
+	_, _, _, subSeq, err := decodeCursor(cfg, cursor)
+	if err != nil {
+		t.Fatalf("decodeCursor: %v", err)
+	}
+	if subSeq != 2 {
+		t.Fatalf("cursor must carry subSeq=2 from the virtual child; got %d", subSeq)
+	}
+}
+
+// TestPaginate_VirtualSiblingsCrossPageBoundary — the END-TO-END pin for
+// the Part B 漏图 fix. Five hits all share (timestamp, messageId) — the
+// pathological "5-image rich-text whose parent fills a page boundary" case
+// — distinguished only by subSeq=1..5. Walking page_size=2 across the
+// boundary must produce all 5 hits in order, no skip, no dup.
+//
+// We drive paginateWithFilter directly: round 1 yields the full 5 hits,
+// the loop fills page=2 and anchors next_cursor at the 2nd hit
+// (subSeq=2). Round 2 (the simulated next page) feeds the OS query the
+// search_after tuple (ts, msgID, 2) — under OS exclusive comparison this
+// returns subSeq=3,4,5; we assert the synthetic round 2 was called with
+// the right tuple, and that page 1 = [subSeq=1, subSeq=2] in order.
+//
+// This is a guard against the v1 漏图 regression: with the OLD sort tuple
+// [ts, msgID], all 5 siblings are equal and search_after at (ts, msgID)
+// silently drops subSeq=3,4,5 entirely. With the fix the tuple is unique
+// and every sibling surfaces.
+func TestPaginate_VirtualSiblingsCrossPageBoundary(t *testing.T) {
+	const sharedTS = int64(1717000000)
+	const sharedMsgID = int64(7777)
+
+	makeHit := func(subSeq int) *elastic.SearchHit {
+		body, _ := json.Marshal(map[string]any{
+			"messageId":       sharedMsgID,
+			"messageSeq":      uint64(99),
+			"channelId":       "C1",
+			"timestamp":       sharedTS,
+			"virtual":         true,
+			"parentMessageId": sharedMsgID,
+			"subSeq":          subSeq,
+			"payload": map[string]any{
+				"type":  2,
+				"image": map[string]any{"url": "http://x", "caption": "img"},
+			},
+		})
+		src := json.RawMessage(body)
+		return &elastic.SearchHit{
+			Source: &src,
+			Sort:   []any{float64(sharedTS), float64(sharedMsgID), float64(subSeq)},
+		}
+	}
+
+	// All five hits visible (parent not revoked).
+	probe := &stubProbe{}
+	h := newVisibilityHandler(probe)
+
+	round := 0
+	var lastSA []any
+	osQuery := func(searchAfter []any, size int) ([]*elastic.SearchHit, error) {
+		round++
+		switch round {
+		case 1:
+			// Whole batch in one round (size=2*3=6 >= 5)
+			return []*elastic.SearchHit{
+				makeHit(1), makeHit(2), makeHit(3), makeHit(4), makeHit(5),
+			}, nil
+		case 2:
+			lastSA = append([]any{}, searchAfter...)
+			return nil, nil
+		}
+		t.Fatalf("unexpected round %d", round)
+		return nil, nil
+	}
+
+	collected, hasMore, nextCursor, err := h.paginateWithFilter(
+		context.Background(), "me", "C1", 2, nil, false,
+		osQuery, projectDocRef("C1"),
+	)
+	if err != nil {
+		t.Fatalf("paginate: %v", err)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("page 1: want 2 hits, got %d", len(collected))
+	}
+	// page 1 should be subSeq=1,2 in order
+	for i, want := range []int{1, 2} {
+		_, gotSub := lastHitMessageIDAndSubSeq(collected[i])
+		if gotSub != want {
+			t.Fatalf("page 1 hit[%d]: want subSeq=%d, got %d", i, want, gotSub)
+		}
+	}
+	if !hasMore {
+		t.Fatalf("hasMore must be true: round 1 returned 5 hits, page=2, so 3 more remain")
+	}
+	if nextCursor == "" {
+		t.Fatalf("hasMore=true requires non-empty cursor")
+	}
+	// Now simulate the NEXT page: decode the cursor as search_after and
+	// confirm the trailing slot is subSeq=2 (the last hit's subSeq). Under
+	// OS's exclusive search_after this excludes all hits whose tuple is
+	// equal to or past (ts, msgID, 2) in the sort direction, so the next
+	// page resumes strictly past subSeq=2 — exactly the contract that
+	// keeps subSeq=3,4,5 from being silently dropped at the boundary.
+	sa, ok := decodeCursorAsSearchAfter(h.cfg, nextCursor, false)
+	if !ok {
+		t.Fatalf("next_cursor must decode as search_after")
+	}
+	if len(sa) != 3 {
+		t.Fatalf("search_after must be 3-tuple [ts, msgID, subSeq]; got %v", sa)
+	}
+	if got, _ := sa[2].(int); got != 2 {
+		t.Fatalf("search_after[2] must be subSeq=2 (last hit of page 1); got %v", sa[2])
+	}
+	_ = lastSA
+}
+

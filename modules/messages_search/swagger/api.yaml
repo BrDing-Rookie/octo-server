@@ -28,8 +28,8 @@ paths:
       tags:
         - "messages_search"
       operationId: "message.search"
-      summary: "Search text + forward messages"
-      description: "Full-text search across text/forward/image/file payload fields scoped to a single channel. Keyword is optional — when empty the endpoint returns the channel's messages in time order (relevance sort then requires a non-empty keyword). An empty keyword requires at least one filter (sender_ids/sent_at_*); keyword + filter both empty is rejected with 400."
+      summary: "Search text + mergeForward + rich-text messages (payload.type ∈ [1,11,14])"
+      description: "Full-text search across payload.text.content, payload.richText.searchText, and payload.mergeForward.msgs[].searchText scoped to a single channel; messages of other types (image/voice/video → /_search_media, file → /_search_files) are excluded by a payload.type IN [1, 11, 14] filter. Keyword is optional — when empty the endpoint returns the channel's messages in time order (relevance sort then requires a non-empty keyword). An empty keyword requires at least one filter (sender_ids/sent_at_*); keyword + filter both empty is rejected with 400."
       consumes:
         - "application/json"
       produces:

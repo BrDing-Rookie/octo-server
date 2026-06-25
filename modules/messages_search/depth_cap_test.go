@@ -27,7 +27,7 @@ func newDepthHandler() *Handler {
 // rejected with DEPTH_EXCEEDED before any OS round-trip.
 func TestResolveCursorDepth_AtCapRejected(t *testing.T) {
 	h := newDepthHandler()
-	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, maxPaginationDepth)
+	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, maxPaginationDepth)
 	c, rec := newDepthCtx(t)
 	_, ok := h.resolveCursorDepth(c, cur, 1)
 	if ok {
@@ -41,7 +41,7 @@ func TestResolveCursorDepth_AtCapRejected(t *testing.T) {
 
 func TestResolveCursorDepth_OverCapRejected(t *testing.T) {
 	h := newDepthHandler()
-	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, maxPaginationDepth+500)
+	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, maxPaginationDepth+500)
 	c, rec := newDepthCtx(t)
 	if _, ok := h.resolveCursorDepth(c, cur, 1); ok {
 		t.Fatalf("cursor over the depth cap must be rejected")
@@ -57,7 +57,7 @@ func TestResolveCursorDepth_UnderCapAllowed(t *testing.T) {
 	if d, ok := h.resolveCursorDepth(c, "", 20); !ok || d != 0 {
 		t.Fatalf("empty cursor must allow with depth 0, got (%d,%v)", d, ok)
 	}
-	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 100)
+	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, 100)
 	c2, _ := newDepthCtx(t)
 	if d, ok := h.resolveCursorDepth(c2, cur, 20); !ok || d != 100 {
 		t.Fatalf("shallow cursor must allow and report depth 100, got (%d,%v)", d, ok)
@@ -69,7 +69,7 @@ func TestResolveCursorDepth_UnderCapAllowed(t *testing.T) {
 // page_size to read past it.
 func TestDepthCap_LargerPageSizeCannotOverrun(t *testing.T) {
 	h := newDepthHandler()
-	nearCap := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, maxPaginationDepth-1)
+	nearCap := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, maxPaginationDepth-1)
 
 	c, rec := newDepthCtx(t)
 	if _, ok := h.resolveCursorDepth(c, nearCap, 100); ok {
@@ -89,7 +89,7 @@ func TestDepthCap_LargerPageSizeCannotOverrun(t *testing.T) {
 // depth is already at/over it.
 func TestDepthCap_SmallPageSizeCannotBypassAtCap(t *testing.T) {
 	h := newDepthHandler()
-	atCap := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, maxPaginationDepth)
+	atCap := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, maxPaginationDepth)
 	c, rec := newDepthCtx(t)
 	if _, ok := h.resolveCursorDepth(c, atCap, 1); ok {
 		t.Fatalf("shrinking page_size must NOT bypass the cumulative depth cap")
@@ -102,7 +102,7 @@ func TestDepthCap_SmallPageSizeCannotBypassAtCap(t *testing.T) {
 // HMAC-signed depth: tampering invalidates the signature → rejected.
 func TestDepthCap_TamperedDepthRejected(t *testing.T) {
 	h := newDepthHandler()
-	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, maxPaginationDepth)
+	cur := encodeCursorWithDepth(h.cfg, 1717000000, 42, nil, 0, maxPaginationDepth)
 	b := []byte(cur)
 	b[len(b)/2] ^= 0x01
 	c, rec := newDepthCtx(t)

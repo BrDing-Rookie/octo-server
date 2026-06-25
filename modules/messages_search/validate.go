@@ -153,7 +153,7 @@ func validateBase(c *wkhttp.Context, cfg SearchConfig, channelType uint8, channe
 	}
 
 	if cursor != "" {
-		if _, _, _, err := decodeCursor(cfg, cursor); err != nil {
+		if _, _, _, _, err := decodeCursor(cfg, cursor); err != nil {
 			respondValidation(c, "cursor", "malformed cursor")
 			return 0, false
 		}

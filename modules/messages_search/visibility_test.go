@@ -432,15 +432,19 @@ func TestPaginateWithFilter_RoundRefillUsesFullPrecisionMessageID(t *testing.T) 
 		t.Fatalf("expected 2 OS rounds (refill must run), got %d", calls)
 	}
 
-	// Time_desc sort tuple shape: [timestamp, messageId]. Both must be
-	// present; messageId must be int64 with no precision loss.
-	if got, want := len(capturedSearchAfter), 2; got != want {
+	// Time_desc sort tuple shape: [timestamp, messageId, subSeq]. All three
+	// must be present; messageId must be int64 with no precision loss; the
+	// trailing subSeq must be the int 0 (legacy doc with no subSeq field).
+	if got, want := len(capturedSearchAfter), 3; got != want {
 		t.Fatalf("search_after len = %d, want %d (tuple=%v)", got, want, capturedSearchAfter)
 	}
 	gotMsgID, ok := capturedSearchAfter[1].(int64)
 	if !ok {
 		t.Fatalf("search_after[1] must be int64 (full precision); got %T (%v)",
 			capturedSearchAfter[1], capturedSearchAfter[1])
+	}
+	if got, ok := capturedSearchAfter[2].(int); !ok || got != 0 {
+		t.Fatalf("search_after[2] must be int(0) for legacy doc without subSeq; got %T(%v)", capturedSearchAfter[2], capturedSearchAfter[2])
 	}
 	wantMsgID := round1IDs[len(round1IDs)-1]
 	if gotMsgID != wantMsgID {
@@ -619,6 +623,45 @@ func TestFilterVisible_VisiblesEmpty_FailOpen(t *testing.T) {
 	}
 }
 
+// TestFilterVisible_VirtualChildHiddenByParentRevoke — end-to-end seam:
+// project a virtual sub-doc through projectDocRef → feed the resulting
+// msgRef into filterVisible with the PARENT id marked revoked → the child
+// must be dropped. This is the operational guarantee of Part B §4:
+// "revoke parent rich-text → all derivative media sub-docs disappear".
+func TestFilterVisible_VirtualChildHiddenByParentRevoke(t *testing.T) {
+	const parentID = "7777"
+	probe := &stubProbe{revoked: map[string]bool{parentID: true}}
+	h := newVisibilityHandler(probe)
+
+	// Synthesize a virtual sub-doc hit (child id = parent id per indexer
+	// contract; the safety belt covers divergence).
+	body, _ := json.Marshal(map[string]any{
+		"messageId":       int64(7777),
+		"messageSeq":      uint64(99),
+		"timestamp":       int64(1717000000),
+		"virtual":         true,
+		"parentMessageId": int64(7777),
+	})
+	src := json.RawMessage(body)
+	hit := &elastic.SearchHit{Source: &src}
+	ref, ok := projectDocRef("C1")(hit)
+	if !ok {
+		t.Fatalf("projectDocRef must accept virtual sub-doc")
+	}
+
+	keep, err := h.filterVisible(context.Background(), "alice", "C1", []msgRef{ref})
+	if err != nil {
+		t.Fatalf("filter: %v", err)
+	}
+	if len(keep) != 0 {
+		t.Fatalf("revoked parent must hide virtual child; kept %v", keepKeysSorted(keep))
+	}
+	// And confirm the IN list went to MySQL keyed by the parent id.
+	if !reflect.DeepEqual(probe.gotRevokedIDs, []string{parentID}) {
+		t.Fatalf("RevokedSet must be queried by parent id; got %v", probe.gotRevokedIDs)
+	}
+}
+
 // TestProjectDocRef_PopulatesVisibles — projectDocRef must read the typed
 // _source so visibles reaches filterVisible. Regression guard: a project
 // that drops this field silently disables the visibles gate even when the
@@ -639,5 +682,105 @@ func TestProjectDocRef_PopulatesVisibles(t *testing.T) {
 	}
 	if !reflect.DeepEqual(ref.Visibles, []string{"alice", "bob"}) {
 		t.Fatalf("Visibles not propagated; got %v", ref.Visibles)
+	}
+}
+
+// TestProjectDocRef_VirtualSubDocRoutesToParent — for a virtual sub-doc
+// (Part B), the visibility key must be the parent's messageId, not the
+// child's own id. This is the load-bearing assertion behind "revoke parent
+// → all derivative media disappear": filterVisible queries MySQL using
+// msgRef.MessageID, so routing to the parent is what lets the parent's
+// revoke/delete state govern the child.
+func TestProjectDocRef_VirtualSubDocRoutesToParent(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"messageId":       int64(7777), // indexer contract: also = parent id
+		"messageSeq":      uint64(99),
+		"timestamp":       int64(1717000000),
+		"virtual":         true,
+		"parentMessageId": int64(7777),
+	})
+	src := json.RawMessage(body)
+	hit := &elastic.SearchHit{Source: &src}
+
+	ref, ok := projectDocRef("C1")(hit)
+	if !ok {
+		t.Fatalf("projectDocRef must accept a virtual sub-doc")
+	}
+	if ref.MessageID != "7777" {
+		t.Fatalf("visibility key must be parent id; got %q want %q", ref.MessageID, "7777")
+	}
+}
+
+// TestProjectDocRef_VirtualSafetyBeltOnDivergentParent — defends the
+// `coalesce` belt added in projectDocRef. If indexer ever lets the child's
+// own messageId diverge from parentMessageId (e.g. moves to a composite id),
+// reader must still route visibility to the parent — otherwise revoking the
+// parent in MySQL would not hide the child.
+func TestProjectDocRef_VirtualSafetyBeltOnDivergentParent(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"messageId":       int64(1234), // hypothetical divergent child id
+		"messageSeq":      uint64(50),
+		"timestamp":       int64(1717000000),
+		"virtual":         true,
+		"parentMessageId": int64(7777),
+	})
+	src := json.RawMessage(body)
+	hit := &elastic.SearchHit{Source: &src}
+
+	ref, ok := projectDocRef("C1")(hit)
+	if !ok {
+		t.Fatalf("projectDocRef must accept a virtual sub-doc")
+	}
+	if ref.MessageID != "7777" {
+		t.Fatalf("safety belt failed: visibility key = %q, want parent %q", ref.MessageID, "7777")
+	}
+}
+
+// TestProjectDocRef_PlainDocKeepsOwnID — non-virtual docs must continue to
+// route visibility to their own messageId. Both `virtual=false` and
+// `virtual` absent are exercised.
+func TestProjectDocRef_PlainDocKeepsOwnID(t *testing.T) {
+	cases := []map[string]any{
+		{"messageId": int64(42), "messageSeq": uint64(7), "timestamp": int64(1)},
+		{"messageId": int64(42), "messageSeq": uint64(7), "timestamp": int64(1), "virtual": false},
+		// Virtual=false with a parentMessageId is ignored by coalesce — the
+		// Virtual flag is the gate, not the presence of parentMessageId.
+		{"messageId": int64(42), "messageSeq": uint64(7), "timestamp": int64(1), "parentMessageId": int64(9999)},
+	}
+	for i, body := range cases {
+		raw, _ := json.Marshal(body)
+		src := json.RawMessage(raw)
+		hit := &elastic.SearchHit{Source: &src}
+		ref, ok := projectDocRef("C1")(hit)
+		if !ok {
+			t.Fatalf("case %d: projectDocRef must accept plain doc", i)
+		}
+		if ref.MessageID != "42" {
+			t.Fatalf("case %d: plain doc must keep own id; got %q want %q", i, ref.MessageID, "42")
+		}
+	}
+}
+
+// TestProjectDocRef_VirtualWithZeroParentFallsBackToOwn — defensive: if
+// virtual=true is set but parentMessageId is missing/zero (broken indexer
+// payload), coalesce falls back to the child's own id rather than emitting
+// a "0" key that would never match any parent in MySQL. Better to drop the
+// hit later via normal filterVisible than to silently grant visibility.
+func TestProjectDocRef_VirtualWithZeroParentFallsBackToOwn(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"messageId":       int64(42),
+		"messageSeq":      uint64(7),
+		"timestamp":       int64(1),
+		"virtual":         true,
+		"parentMessageId": int64(0),
+	})
+	src := json.RawMessage(body)
+	hit := &elastic.SearchHit{Source: &src}
+	ref, ok := projectDocRef("C1")(hit)
+	if !ok {
+		t.Fatalf("projectDocRef must still accept the hit")
+	}
+	if ref.MessageID != "42" {
+		t.Fatalf("zero parent must fall back to own id; got %q", ref.MessageID)
 	}
 }

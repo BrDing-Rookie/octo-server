@@ -83,3 +83,46 @@ func TestSingleSearchAllHit_ForwardKeepsMessageType(t *testing.T) {
 		t.Errorf("outer_preview: %+v", got.Message.OuterPreview)
 	}
 }
+
+// Rich-text (payload.type=14) keeps result_type=message — it is rendered as a
+// message, not a file — and folds into the existing "text" kind so the wire
+// contract stays at the two-value enum {text, forward}. Snippet falls back to
+// the indexer's plain projection (payload.richText.searchText) when no
+// highlight was attached (empty-keyword browse).
+func TestSingleSearchAllHit_RichTextKeepsMessageType(t *testing.T) {
+	tp := payloadTypeRichText
+	doc := Doc{
+		MessageID:  103,
+		MessageSeq: 11,
+		From:       "u3",
+		Timestamp:  1717000002,
+		Payload: &Payload{
+			Type:     &tp,
+			RichText: &RichTextPayload{SearchText: "富文本搜索 命中预览"},
+		},
+	}
+	h := &Handler{cfg: SearchConfig{}, cache: newSenderCache(8, 0)}
+	// Keyword path: highlight on richText.searchText wins via pickSnippet.
+	hl := map[string][]string{"payload.richText.searchText": {"富文本<mark>搜索</mark>"}}
+	got := h.singleSearchAllHit(doc, SearchAllReq{ChannelType: channelTypeGroup, ChannelID: "g"}, hl)
+	if got.ResultType != "message" {
+		t.Errorf("richtext must be 'message': got %q", got.ResultType)
+	}
+	if got.Message == nil {
+		t.Fatalf("message must be populated for richtext")
+	}
+	if got.Message.MessageKind != "text" {
+		t.Errorf("richtext kind must fold into text: got %q", got.Message.MessageKind)
+	}
+	if got.Message.Snippet != "富文本<mark>搜索</mark>" {
+		t.Errorf("richtext keyword snippet: got %q", got.Message.Snippet)
+	}
+	// Empty-keyword browse path: no highlight → fall back to raw richText.
+	got2 := h.singleSearchAllHit(doc, SearchAllReq{ChannelType: channelTypeGroup, ChannelID: "g"}, nil)
+	if got2.Message.Snippet != "富文本搜索 命中预览" {
+		t.Errorf("richtext browse fallback snippet: got %q", got2.Message.Snippet)
+	}
+	if got.File != nil {
+		t.Errorf("file should be nil for richtext result")
+	}
+}
