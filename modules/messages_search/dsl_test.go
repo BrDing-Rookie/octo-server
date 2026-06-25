@@ -595,10 +595,118 @@ func TestBuildSearchAllDSL_NoKeywordKeepsTypeFilter(t *testing.T) {
 			t.Errorf("empty-keyword search_all DSL missing %q in:\n%s", want, body)
 		}
 	}
-	// type filter must still segment message vs file
-	if !strings.Contains(body, `"payload.type":[1,8,11,14]`) && !strings.Contains(body, `"payload.type":[1, 8, 11, 14]`) {
-		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11,14]:\n%s", body)
+	// Browse mode (keyword="") layers image(2) + video(5) onto the type
+	// whitelist so the unified feed shows recent media alongside text.
+	if !strings.Contains(body, `"payload.type":[1,8,11,14,2,5]`) && !strings.Contains(body, `"payload.type":[1, 8, 11, 14, 2, 5]`) {
+		t.Errorf("empty-keyword search_all DSL must filter payload.type [1,8,11,14,2,5]:\n%s", body)
 	}
+}
+
+// TestBuildSearchAllDSL_ImageVideoGatedByKeyword pins the contract that
+// image (payload.type=2) and video (payload.type=5) appear in the
+// /_search_all type filter ONLY when keyword is empty. The keyword path
+// hard-excludes them because the should[textClause, fileClause] + MSM=1
+// keyword clause has no field on a media payload and would emit
+// zero-relevance hits.
+func TestBuildSearchAllDSL_ImageVideoGatedByKeyword(t *testing.T) {
+	extractTypes := func(t *testing.T, raw []byte) []int {
+		t.Helper()
+		var normalized map[string]any
+		if err := json.Unmarshal(raw, &normalized); err != nil {
+			t.Fatalf("normalize: %v", err)
+		}
+		boolNode, ok := normalized["bool"].(map[string]any)
+		if !ok {
+			t.Fatalf("query has no bool node: %s", raw)
+		}
+		rawFilter, ok := boolNode["filter"]
+		if !ok {
+			t.Fatalf("bool has no filter: %s", raw)
+		}
+		var filters []any
+		switch v := rawFilter.(type) {
+		case []any:
+			filters = v
+		case map[string]any:
+			filters = []any{v}
+		default:
+			t.Fatalf("filter has unexpected shape %T: %s", rawFilter, raw)
+		}
+		for _, clause := range filters {
+			m, ok := clause.(map[string]any)
+			if !ok {
+				continue
+			}
+			terms, ok := m["terms"].(map[string]any)
+			if !ok {
+				continue
+			}
+			arr, ok := terms["payload.type"].([]any)
+			if !ok {
+				continue
+			}
+			out := make([]int, 0, len(arr))
+			for _, v := range arr {
+				out = append(out, int(v.(float64)))
+			}
+			return out
+		}
+		t.Fatalf("bool.filter has no terms(payload.type) clause:\n%s", raw)
+		return nil
+	}
+
+	t.Run("keyword excludes image and video", func(t *testing.T) {
+		req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g", Keyword: "hello"}
+		q, _ := buildSearchAllDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+		src, err := q.(interface{ Source() (any, error) }).Source()
+		if err != nil {
+			t.Fatalf("Source(): %v", err)
+		}
+		raw, _ := json.Marshal(src)
+		got := extractTypes(t, raw)
+		for _, banned := range []int{payloadTypeImage, payloadTypeVideo} {
+			for _, v := range got {
+				if v == banned {
+					t.Errorf("keyword path must not include payload.type=%d (got %v): %s", banned, got, raw)
+				}
+			}
+		}
+		for _, want := range []int{payloadTypeText, payloadTypeFile, payloadTypeMergeForward, payloadTypeRichText} {
+			found := false
+			for _, v := range got {
+				if v == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("keyword path must include payload.type=%d (got %v)", want, got)
+			}
+		}
+	})
+
+	t.Run("empty keyword includes image and video", func(t *testing.T) {
+		req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g"}
+		q, _ := buildSearchAllDSL(context.Background(), fallbackTestAnalyzer(), true, req, "g", "")
+		src, err := q.(interface{ Source() (any, error) }).Source()
+		if err != nil {
+			t.Fatalf("Source(): %v", err)
+		}
+		raw, _ := json.Marshal(src)
+		got := extractTypes(t, raw)
+		for _, want := range []int{payloadTypeImage, payloadTypeVideo} {
+			found := false
+			for _, v := range got {
+				if v == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("empty-keyword path must include payload.type=%d (got %v)", want, got)
+			}
+		}
+	})
 }
 
 func TestExtractSortValues(t *testing.T) {
