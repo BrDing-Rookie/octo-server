@@ -154,7 +154,7 @@ func buildSearchAllDSL(ctx context.Context, analyzer tokenAnalyzer, stopwordStri
 		// branches — the eff/useMSM defaults above match that contract.
 		textClause := buildKeywordClauseFromAnalyzed(eff, useMSM,
 			"payload.text.content^3",
-			"payload.richText.searchText",
+			"payload.richText.searchText^3",
 			"payload.mergeForward.msgs.searchText",
 		)
 		fileClause := buildKeywordClauseFromAnalyzed(eff, useMSM,

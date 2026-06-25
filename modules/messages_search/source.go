@@ -50,7 +50,10 @@ type Doc struct {
 	// sort tuple so OpenSearch search_after never silently skips siblings
 	// that share (timestamp, messageId) with their parent. Storage docs that
 	// pre-date the field deserialize to 0, which matches the plain/parent
-	// convention — safe to ship before the indexer field exists.
+	// convention — safe for the read/deserialize path before the indexer field
+	// exists. NOTE: sorting on subSeq is NOT safe by itself — applySort must
+	// pass UnmappedType+Missing(0) so a reader-first deploy doesn't 400 on the
+	// missing mapping (see dsl.go::applySort).
 	SubSeq int `json:"subSeq,omitempty"`
 	// Visibles is the per-message allowlist a sender may attach to a group
 	// message so only the listed UIDs see it (mirrors the read-path gate

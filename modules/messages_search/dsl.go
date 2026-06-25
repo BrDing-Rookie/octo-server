@@ -142,27 +142,46 @@ func applySpaceIDScope(b *elastic.BoolQuery, channelType uint8, spaceID string) 
 // 1..N on virtual children, so the tuple becomes globally unique. Legacy
 // docs without the field deserialise to 0 — same value as plain docs, so
 // the sort stays stable before the indexer field ships.
+//
+// subSeq carries UnmappedType("long") + Missing(0): the field is absent from
+// the OpenSearch mapping until the indexer rollout lands, and a sort on an
+// unmapped field hard-fails with query_shard_exception ("No mapping found for
+// [subSeq]"). Without this, a reader-first deploy (the documented rollout
+// order) or a rollback would 400 every /_search* call. unmapped_type makes OS
+// treat the missing field as a long, Missing(0) pins absent values to the same
+// 0 the plain/parent convention uses — no behaviour change once mapping exists.
 func applySort(s *elastic.SearchService, sort string) *elastic.SearchService {
+	return s.SortBy(searchSorters(sort)...)
+}
+
+// searchSorters returns the ordered sort keys applySort applies. Extracted so
+// tests can pin the exact wire shape (field order + the subSeq unmapped_type /
+// missing guards) against the production builders rather than a hand-rebuilt
+// copy.
+func searchSorters(sort string) []elastic.Sorter {
+	// subSeq always carries unmapped_type+missing — see applySort doc above.
+	subSeqAsc := elastic.NewFieldSort("subSeq").Asc().UnmappedType("long").Missing(0)
+	subSeqDesc := elastic.NewFieldSort("subSeq").Desc().UnmappedType("long").Missing(0)
 	switch sort {
 	case "time_asc":
-		return s.SortBy(
+		return []elastic.Sorter{
 			elastic.NewFieldSort("timestamp").Asc(),
 			elastic.NewFieldSort("messageId").Asc(),
-			elastic.NewFieldSort("subSeq").Asc(),
-		)
+			subSeqAsc,
+		}
 	case "relevance":
-		return s.SortBy(
+		return []elastic.Sorter{
 			elastic.NewFieldSort("timestamp").Desc(),
 			elastic.NewScoreSort(),
 			elastic.NewFieldSort("messageId").Desc(),
-			elastic.NewFieldSort("subSeq").Desc(),
-		)
+			subSeqDesc,
+		}
 	default:
-		return s.SortBy(
+		return []elastic.Sorter{
 			elastic.NewFieldSort("timestamp").Desc(),
 			elastic.NewFieldSort("messageId").Desc(),
-			elastic.NewFieldSort("subSeq").Desc(),
-		)
+			subSeqDesc,
+		}
 	}
 }
 

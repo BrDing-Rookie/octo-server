@@ -560,7 +560,7 @@ func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 		`"payload.type":[1,8,11,14]`,
 		`"minimum_should_match":"1"`,
 		`"payload.text.content^3"`,
-		`"payload.richText.searchText"`,
+		`"payload.richText.searchText^3"`,
 		`"payload.file.name^2"`,
 		`"virtual":true`,
 	} {
@@ -735,33 +735,11 @@ func TestApplySort_IncludesSubSeqTiebreaker(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.sort, func(t *testing.T) {
+			// Drive the production sort builders directly so this pins the real
+			// wire shape (field order + the subSeq unmapped_type/missing guards),
+			// not a hand-rebuilt copy that could drift from applySort.
 			ss := elastic.NewSearchSource()
-			// Reuse the same sort-by builders applySort uses by reconstructing
-			// the field order. We can't easily call applySort directly on a
-			// SearchSource (it takes a SearchService), so mirror the same
-			// SortBy invocations here against a SearchSource; the SortBy call
-			// chain is shared internal code so this still pins the wire shape.
-			switch tc.sort {
-			case "time_asc":
-				ss = ss.SortBy(
-					elastic.NewFieldSort("timestamp").Asc(),
-					elastic.NewFieldSort("messageId").Asc(),
-					elastic.NewFieldSort("subSeq").Asc(),
-				)
-			case "relevance":
-				ss = ss.SortBy(
-					elastic.NewFieldSort("timestamp").Desc(),
-					elastic.NewScoreSort(),
-					elastic.NewFieldSort("messageId").Desc(),
-					elastic.NewFieldSort("subSeq").Desc(),
-				)
-			default:
-				ss = ss.SortBy(
-					elastic.NewFieldSort("timestamp").Desc(),
-					elastic.NewFieldSort("messageId").Desc(),
-					elastic.NewFieldSort("subSeq").Desc(),
-				)
-			}
+			ss = ss.SortBy(searchSorters(tc.sort)...)
 			src, err := ss.Source()
 			if err != nil {
 				t.Fatalf("Source(): %v", err)
@@ -783,6 +761,15 @@ func TestApplySort_IncludesSubSeqTiebreaker(t *testing.T) {
 			}
 			if !strings.Contains(body, `"subSeq"`) {
 				t.Fatalf("%s: subSeq tiebreaker missing in:\n%s", tc.sort, body)
+			}
+			// Reader-first deploy guard: the subSeq sort MUST carry
+			// unmapped_type + missing, otherwise OS 400s on the absent mapping
+			// before the indexer rollout lands and every /_search* goes down.
+			if !strings.Contains(body, `"unmapped_type":"long"`) {
+				t.Fatalf("%s: subSeq sort missing unmapped_type guard in:\n%s", tc.sort, body)
+			}
+			if !strings.Contains(body, `"missing":0`) {
+				t.Fatalf("%s: subSeq sort missing missing=0 guard in:\n%s", tc.sort, body)
 			}
 		})
 	}
