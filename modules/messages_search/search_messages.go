@@ -13,7 +13,7 @@ import (
 
 // MessageHit is the response shape per A doc §2.1.
 //
-// MediaKind / ThumbURL / Width / Height / DurationMs are populated only for
+// MessageKind / ThumbURL / Width / Height / DurationMs are populated only for
 // image (payload.type=2) and video (payload.type=5) hits surfaced by
 // /_search_all browse mode (or by /_search_around, which has no type
 // whitelist). They mirror MediaHit's renderable fields so the client can
@@ -278,6 +278,9 @@ func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][
 // conversion. Both use omitempty fields, so plain text / forward / file hits
 // keep their existing wire shape byte-identical.
 func applyMediaProjection(mh *MessageHit, p *Payload) {
+	if p == nil || p.MergeForward != nil {
+		return
+	}
 	switch payloadType(p) {
 	case payloadTypeImage:
 		if img := imagePayloadOf(p); img != nil {
@@ -290,7 +293,9 @@ func applyMediaProjection(mh *MessageHit, p *Payload) {
 			mh.ThumbURL = vid.Cover
 			mh.Width = vid.Width
 			mh.Height = vid.Height
-			mh.DurationMs = int64(vid.Second) * 1000
+			if vid.Second > 0 {
+				mh.DurationMs = int64(vid.Second) * 1000
+			}
 		}
 	}
 }
