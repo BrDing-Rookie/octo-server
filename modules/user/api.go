@@ -23,6 +23,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarrender"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
+	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	rd "github.com/go-redis/redis"
@@ -594,14 +595,26 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 			}
 			setAvatarHeaders(etag)
 			if ifNoneMatchSatisfied(c.GetHeader("If-None-Match"), etag) {
+				metrics.ObserveAvatarNotModified()
 				c.Status(http.StatusNotModified)
 				return
 			}
 
+			// 非条件 GET（disable-cache / 首屏 / 共享缓存 miss）会绕过上面的 304 快路径，
+			// 落到这里真渲染。成员列表扇出下大量并发非条件 GET 会把 CPU 打满、饿死同机
+			// 其它请求（issue#480）。渲染统一走共享缓存：相同内容 key 命中复用字节、
+			// singleflight 合并并发冷渲染、渲染信号量限并发，确保一次扇出最多渲一张。
+			//
+			// 缓存 key 用 avatarCacheKey（完整原始因子），**不是**上面的 CRC32 ETag：
+			// ETag 是 32 位弱指纹，作共享缓存身份会碰撞→跨用户串图（PR#481 评审）。
+			// 两者覆盖同一组因子（渲染版本/uid→色/文字），仅 ETag 头继续用 CRC32。
 			if nameMode {
-				imageData, genErr := avatarrender.Render(avatarrender.Options{
-					Text: text,
-					Bg:   avatarrender.ColorForSeed(uid),
+				nameKey := avatarCacheKey("name-v3", uid, text)
+				imageData, genErr := avatarrender.GetOrRender(nameKey, func() ([]byte, error) {
+					return avatarrender.Render(avatarrender.Options{
+						Text: text,
+						Bg:   avatarrender.ColorForSeed(uid),
+					})
 				})
 				if genErr == nil {
 					c.Data(http.StatusOK, "image/png", imageData)
@@ -611,7 +624,10 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 				u.Error("生成昵称默认头像失败，回退兜底", zap.Error(genErr), zap.String("uid", uid))
 				c.Header("ETag", avatarETag("ascii-v1", uid))
 			}
-			imageData, genErr := generateDefaultAvatar(uid)
+			asciiKey := avatarCacheKey("ascii-v1", uid)
+			imageData, genErr := avatarrender.GetOrRender(asciiKey, func() ([]byte, error) {
+				return generateDefaultAvatar(uid)
+			})
 			if genErr != nil {
 				u.Error("生成默认头像失败", zap.Error(genErr))
 				c.Writer.WriteHeader(http.StatusInternalServerError)
