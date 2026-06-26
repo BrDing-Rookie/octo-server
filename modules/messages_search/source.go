@@ -167,12 +167,27 @@ const (
 	payloadTypeSystemMax = 2000
 )
 
-// classifyKind decides the response `message_kind` for /v1/messages/_search.
-// Per A doc v4.2 we only emit "forward" or "text"; quote/reply messages get
-// folded into "text" because the outer payload.text is what matched.
+// classifyKind decides the response `message_kind` for /v1/messages/_search
+// and /v1/messages/_search_all (browse mode surfaces image/video here too).
+// Priority: mergeForward beats raw payload.type so a forward card whose
+// payload also happens to mention an image still renders as a forward.
+// Image (2) / video (5) surface as their own kinds so the client can switch
+// to the media renderer instead of trying to render an empty text snippet —
+// this also reaches /_search_around, which is the intended behaviour (the
+// around window already returns image/file docs and previously stamped them
+// as "text"). Everything else folds into "text".
 func classifyKind(p *Payload) string {
-	if p != nil && p.MergeForward != nil {
+	if p == nil {
+		return "text"
+	}
+	if p.MergeForward != nil {
 		return "forward"
+	}
+	switch payloadType(p) {
+	case payloadTypeImage:
+		return "image"
+	case payloadTypeVideo:
+		return "video"
 	}
 	return "text"
 }

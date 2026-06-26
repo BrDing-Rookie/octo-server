@@ -544,29 +544,39 @@ func resolveFileExt(f *FilePayload) string {
 
 差异（vs `_search`）：
 
-- DSL：`should[multi_match(text+plain+forward), multi_match(file.name+caption)] + filter[payload.type IN {1, 8, 11}]`（text / file / mergeForward）
-- 响应字段：`result_type` 判别式（`payload.type` → "message" / "file"）+ 嵌套 `message` / `file` 子对象 + `sorted_at`（=内层 `sent_at`）
+- DSL：`should[multi_match(text+richText+forward), multi_match(file.name+caption)] + filter[payload.type IN ?]`，其中 `payload.type` 白名单按 keyword 是否为空分两段：
+  - keyword 非空：`{1, 8, 11, 14}`（text / file / mergeForward / richText）— 媒体 payload 在 `should` 上没有可命中的字段，会被 MSM=1 过滤掉或者落成零分噪声，索性硬剔除
+  - keyword 为空（浏览模式）：`{1, 8, 11, 14, 2, 5}` — 多加 image / video，统一信息流里能看到最近的图片和视频
+- 响应字段：`result_type` 判别式（`payload.type` → "message" / "file"）+ 嵌套 `message` / `file` 子对象 + `sorted_at`（=内层 `sent_at`）。浏览模式的 image / video 走 `result_type=message`，`message.message_kind` 取 `"image"` / `"video"`，并附 `thumb_url` / `width` / `height` / `duration_ms`（仅 video）——同 `MediaHit` 的渲染字段保持一致
 
 DSL 关键片段：
 
 ```go
 b := elastic.NewBoolQuery()
 b.Filter(elastic.NewTermQuery("channelId", normalizedChannelID(req, loginUID)))
-b.Filter(elastic.NewTermsQuery("payload.type", 1, 8, 11))
+// 浏览模式额外注入 image(2) + video(5)
+allowed := []any{1, 8, 11, 14}
+if req.Keyword == "" {
+    allowed = append(allowed, 2, 5)
+}
+b.Filter(elastic.NewTermsQuery("payload.type", allowed...))
 b.MustNot(elastic.NewTermQuery("revoked", true))
 
-// should 必须至少命中一个
-should := []elastic.Query{
-    elastic.NewMultiMatchQuery(req.Keyword,
-        "payload.text.content^3",
-        "payload.mergeForward.msgs.searchText",
-    ),
-    elastic.NewMultiMatchQuery(req.Keyword,
-        "payload.file.name^2",
-        "payload.file.caption",
-    ),
+// keyword 路径才挂 should（含 richText.searchText）
+if req.Keyword != "" {
+    should := []elastic.Query{
+        elastic.NewMultiMatchQuery(req.Keyword,
+            "payload.text.content^3",
+            "payload.richText.searchText^3",
+            "payload.mergeForward.msgs.searchText",
+        ),
+        elastic.NewMultiMatchQuery(req.Keyword,
+            "payload.file.name^2",
+            "payload.file.caption",
+        ),
+    }
+    b.Should(should...).MinimumShouldMatch("1")
 }
-b.Should(should...).MinimumShouldMatch("1")
 ```
 
 响应映射：

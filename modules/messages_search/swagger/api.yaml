@@ -480,7 +480,13 @@ definitions:
         format: int64
       message_kind:
         type: string
-        enum: ["text", "forward"]
+        enum: ["text", "forward", "image", "video"]
+        description: |
+          Classification of the hit's renderable kind. "image" / "video" only
+          appear on /_search_all browse mode (empty keyword) and on
+          /_search_around, where the response includes media docs alongside
+          text/forward. The keyword-bearing /_search and /_search_all paths
+          stay limited to "text" / "forward".
       snippet:
         type: string
       sender_id:
@@ -505,6 +511,36 @@ definitions:
           $ref: "#/definitions/InnerMessage"
       channel_id:
         type: string
+      thumb_url:
+        type: string
+        format: uri
+        description: |
+          Image/video thumbnail (mirrors MediaHit.thumb_url). Only present
+          when message_kind ∈ ["image", "video"] — i.e. on /_search_all
+          browse mode (no keyword) and /_search_around media hits. Omitted
+          on text / forward hits.
+      width:
+        type: integer
+        description: |
+          Image/video pixel width (mirrors MediaHit.width). Only present
+          when message_kind ∈ ["image", "video"] — i.e. on /_search_all
+          browse mode (no keyword) and /_search_around media hits. Omitted
+          on text / forward hits.
+      height:
+        type: integer
+        description: |
+          Image/video pixel height (mirrors MediaHit.height). Only present
+          when message_kind ∈ ["image", "video"] — i.e. on /_search_all
+          browse mode (no keyword) and /_search_around media hits. Omitted
+          on text / forward hits.
+      duration_ms:
+        type: integer
+        format: int64
+        description: |
+          Video duration in milliseconds (mirrors MediaHit.duration_ms).
+          Only present when message_kind="video" — i.e. on /_search_all
+          browse mode (no keyword) and /_search_around video hits. Omitted
+          on image / text / forward hits.
 
   MediaHit:
     type: object

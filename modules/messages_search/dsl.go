@@ -254,6 +254,13 @@ func fallbackSnippet(p *Payload) string {
 	if p.File != nil && p.File.Name != "" {
 		return truncateRunes(p.File.Name, snippetWindow)
 	}
+	// Video has no text-bearing field in the v1.8 indexer projection
+	// (VideoPayload carries url/cover/width/height/second only — see
+	// source.go), so there is nothing to clip into a snippet. Browse-mode
+	// /_search_all and /_search_around now surface the renderable bits
+	// (thumb_url, duration_ms, dimensions) directly on MessageHit via
+	// applyMediaProjection — the empty snippet here is intentional, not a
+	// missed branch.
 	return ""
 }
 

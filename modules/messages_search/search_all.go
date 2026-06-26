@@ -131,12 +131,22 @@ func buildSearchAllDSL(ctx context.Context, analyzer tokenAnalyzer, stopwordStri
 	applyChannelAndRevoked(b, normChannelID)
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	applyExcludeVirtual(b)
-	b.Filter(elastic.NewTermsQuery("payload.type",
+	// Image (2) / video (5) are surfaced ONLY on the empty-keyword browse
+	// path. With a keyword, the should[textClause, fileClause] + MSM=1 has no
+	// field to hit on media payloads — they would either drop on MSM or
+	// surface as zero-relevance noise — so the keyword path keeps the
+	// text-bearing whitelist [1, 8, 11, 14]. Browse mode (keyword="") layers
+	// media in so the unified feed shows recent photos/videos alongside text.
+	allowedTypes := []any{
 		payloadTypeText,
 		payloadTypeFile,
 		payloadTypeMergeForward,
 		payloadTypeRichText,
-	))
+	}
+	if req.Keyword == "" {
+		allowedTypes = append(allowedTypes, payloadTypeImage, payloadTypeVideo)
+	}
+	b.Filter(elastic.NewTermsQuery("payload.type", allowedTypes...))
 	addCommonFilters(b, req.Filters)
 	var analyzeErr error
 	if req.Keyword != "" {
