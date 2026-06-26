@@ -387,25 +387,70 @@ func TestCheckChannelAccess_P2POtherBotNonFriendDenied(t *testing.T) {
 }
 
 // TestCheckChannelAccess_P2POtherBotFriendAllowed — other user's bot WITH a
-// friend row passes (mirrors the read path: once added, a stranger's bot
-// is conversational like any other bot).
+// friend row AND no blacklist passes (mirrors the read path: once added,
+// a stranger's bot is conversational like any other peer, so it goes
+// through the bidirectional blacklist gate the same way as a real user).
 func TestCheckChannelAccess_P2POtherBotFriendAllowed(t *testing.T) {
 	uSvc := &stubAuthzUserSvc{
-		robots:  map[string]robotStub{"botX": {isRobot: true, creator: "alice"}},
-		friends: map[string]bool{friendKey("me", "botX"): true},
+		robots:     map[string]robotStub{"botX": {isRobot: true, creator: "alice"}},
+		friends:    map[string]bool{friendKey("me", "botX"): true},
+		blacklists: map[string]bool{},
 	}
 	h := newAuthzHandlerFull(&stubAuthzGroupSvc{}, uSvc, &stubAuthzThreadSvc{})
 	c, rec := newAuthzCtxWithSpace(t, "S1")
 
 	if !h.checkChannelAccess(c, channelTypePerson, "botX", "me") {
-		t.Fatalf("other-user bot with friend relation must pass")
+		t.Fatalf("other-user bot with friend relation and clean blacklist must pass")
 	}
-	if uSvc.blCalls != 0 {
-		t.Fatalf("other-bot/friend path must not consult blacklist, got %d", uSvc.blCalls)
+	if uSvc.blCalls != 2 {
+		t.Fatalf("other-bot/friend path must consult blacklist bidirectionally, got %d", uSvc.blCalls)
+	}
+	if uSvc.spaceCalls != 0 {
+		t.Fatalf("other-bot path must not consult AreSpaceMembers, got %d", uSvc.spaceCalls)
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("no response should be written on allow, got %q", rec.Body.String())
 	}
+}
+
+// TestCheckChannelAccess_P2POtherBotFriendBlacklisted — other user's bot
+// that has been blacklisted (either direction) must be hidden from
+// search, matching the legacy pre-Space behavior where a friend bot
+// flowed through bidirectional blacklist just like a real-user peer.
+// Regression guard for PR #469 review (option (a)).
+func TestCheckChannelAccess_P2POtherBotFriendBlacklisted(t *testing.T) {
+	t.Run("blocked_by_me", func(t *testing.T) {
+		uSvc := &stubAuthzUserSvc{
+			robots:     map[string]robotStub{"botX": {isRobot: true, creator: "alice"}},
+			friends:    map[string]bool{friendKey("me", "botX"): true},
+			blacklists: map[string]bool{blacklistKey("me", "botX"): true},
+		}
+		h := newAuthzHandlerFull(&stubAuthzGroupSvc{}, uSvc, &stubAuthzThreadSvc{})
+		c, rec := newAuthzCtxWithSpace(t, "S1")
+
+		if h.checkChannelAccess(c, channelTypePerson, "botX", "me") {
+			t.Fatalf("other-user bot blocked by caller must be denied")
+		}
+		if !strings.Contains(rec.Body.String(), "not found") {
+			t.Fatalf("denial should render the not_found envelope, got %q", rec.Body.String())
+		}
+	})
+	t.Run("blocked_by_peer", func(t *testing.T) {
+		uSvc := &stubAuthzUserSvc{
+			robots:     map[string]robotStub{"botX": {isRobot: true, creator: "alice"}},
+			friends:    map[string]bool{friendKey("me", "botX"): true},
+			blacklists: map[string]bool{blacklistKey("botX", "me"): true},
+		}
+		h := newAuthzHandlerFull(&stubAuthzGroupSvc{}, uSvc, &stubAuthzThreadSvc{})
+		c, rec := newAuthzCtxWithSpace(t, "S1")
+
+		if h.checkChannelAccess(c, channelTypePerson, "botX", "me") {
+			t.Fatalf("other-user bot that has blocked caller must be denied")
+		}
+		if !strings.Contains(rec.Body.String(), "not found") {
+			t.Fatalf("denial should render the not_found envelope, got %q", rec.Body.String())
+		}
+	})
 }
 
 // TestCheckChannelAccess_P2PRobotInfoErrorFailsClosed — DB error on the
