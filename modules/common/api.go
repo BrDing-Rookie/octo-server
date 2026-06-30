@@ -46,6 +46,10 @@ func New(ctx *config.Context) *Common {
 		threadOn = 1
 	}
 	database := newDB(ctx.DB())
+	// 启动期即解析内嵌表情清单:内嵌 JSON 若损坏会在此处 panic(fail-fast),而不是拖到首个
+	// 请求才暴露。sync.Once 在 panic 后也会标记 done,所以必须在启动期触发一次,否则线上会
+	// 出现"首请求 panic、之后返回零值 manifest/空 ETag"的退化。handler 仍调用它(此后为 no-op)。
+	loadEmojiManifest()
 	return &Common{
 		ctx:              ctx,
 		db:               database,
@@ -83,6 +87,7 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 		commonNoAuth.GET("/updater/:os/:version", cn.updater)  // 版本更新检查（兼容tauri）
 		commonNoAuth.GET("/pcupdater/:os", cn.getPCNewVersion) // pc版本更新检查
 		commonNoAuth.GET("/changelog", cn.changelog)           // 版本更新日志（公开）
+		commonNoAuth.GET("/emojis", cn.emojiManifest)          // 内置自定义表情清单（公开，客户端动态渲染，见 emoji.go）
 	}
 
 	r.GET("/v1/health", cn.health)

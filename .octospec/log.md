@@ -20,6 +20,14 @@ change-log convention (§7). Newest first.
   `is_named` stays load-bearing (not deprecated) as the legacy/new discriminator;
   `GroupResp.is_named` re-documented as 1=legacy/0=new predictor. No render-version
   bump, no new migration. Brief under `.octospec/tasks/group-avatar-name-no-text/`.
+- **Add** — Task `common-builtin-emoji-manifest`: public, cacheable
+  `GET /v1/common/emojis` returning the built-in custom emoji manifest
+  (`{version, list:[{key,name,url}]}`) from an embedded JSON single source of
+  truth, mirroring the `avatar_palette` (#500) pattern (content ETag +
+  `must-revalidate` + 304). Clients fetch + cache instead of hardcoding the
+  `[xxx]` emoji list. `url` optional per item (built-ins reuse client bundle);
+  no DB / errcode / i18n added. New `modules/common/emoji.go`,
+  `modules/common/emojis/manifest.json`, `emoji_test.go`, swagger entry.
 
 ## 2026-06-27
 
