@@ -52,7 +52,7 @@ func (h *Handler) enumerateReadableChannels(c *wkhttp.Context, p Principal) ([]c
 
 // principalForSubject 为一个「已解析的真人语义主体」返回其 principal 载体，供内部枚举
 // 路径（resolveGlobalScope）经归一化谓词求值时使用。优先返回路由显式写入的 principal
-//（bot / uk / obo，#B），否则用传入的 uid/spaceID 组装真人载体——这保证现网真人路径与
+// （bot / uk / obo，#B），否则用传入的 uid/spaceID 组装真人载体——这保证现网真人路径与
 // 直接以 (loginUID, spaceID) 驱动枚举的既有单测行为完全不变。
 func principalForSubject(c *wkhttp.Context, uid, spaceID string) Principal {
 	if v, ok := c.Get(principalCtxKey); ok {
@@ -65,15 +65,36 @@ func principalForSubject(c *wkhttp.Context, uid, spaceID string) Principal {
 
 // botCanReadChannel 是 as-bot 单频道门的接线点（#C/#D）。bot 谓词 =
 // IsFriend(botUID, peer) 的 DM ∪ ExistMemberActive(group, botUID) 的群/子区，
-// 且跳过 Space 段与全部 P2P blacklist。本层 fail-closed 占位：渲染 NOT_FOUND
-//（反枚举，与真人拒绝一致）。#B 接线 bot 路由前不会触达此分支。
+// 且跳过 Space 段与全部 P2P blacklist。按 channelType 分派：
+//
+//   - person（1）：#C（YUJ-50）已接线 —— botCheckP2PAccess（见 authz.go），
+//     谓词 = IsFriend(botUID, peer)，是 #E buildBotAllowlist 的 GetFriends(botUID)
+//     枚举对偶（决策九）；跳过 Space 与双向 blacklist。
+//   - group（2）/ thread（5）：#D（YUJ-51）的接线点，尚未落地 —— 保持 fail-closed
+//     占位（渲染 NOT_FOUND，反枚举，与真人拒绝一致）。
+//   - 其他：validate.go 已在此前拒绝未知 channelType；仍 fail-closed 兜底。
+//
+// #B 接线 bot 路由前不会触达此分支。
 func (h *Handler) botCanReadChannel(c *wkhttp.Context, p Principal, channelType uint8, channelID string) bool {
-	h.Warn("messages_search: as-bot channel gate not yet implemented (YUJ-50/51); denying fail-closed",
-		zap.String("bot_uid", p.SubjectUID()),
-		zap.Uint8("channel_type", channelType),
-		zap.String("channel_id", channelID))
-	respondNotFound(c, "channel")
-	return false
+	switch channelType {
+	case channelTypePerson:
+		return h.botCheckP2PAccess(c, p.SubjectUID(), channelID)
+	case channelTypeGroup, channelTypeThread:
+		// #D（YUJ-51）尚未接线：群/子区门主体换 botUID（ExistMemberActive）在此落。
+		h.Warn("messages_search: as-bot group/thread gate not yet implemented (YUJ-51); denying fail-closed",
+			zap.String("bot_uid", p.SubjectUID()),
+			zap.Uint8("channel_type", channelType),
+			zap.String("channel_id", channelID))
+		respondNotFound(c, "channel")
+		return false
+	default:
+		h.Warn("messages_search: as-bot channel gate unexpected channel_type; denying fail-closed",
+			zap.String("bot_uid", p.SubjectUID()),
+			zap.Uint8("channel_type", channelType),
+			zap.String("channel_id", channelID))
+		respondNotFound(c, "channel")
+		return false
+	}
 }
 
 // botEnumerateReadableChannels 是 as-bot global allowlist 枚举的接线点（#E）。
