@@ -16,8 +16,9 @@ import (
 // 本层（YUJ-48）只定义接口 + dispatch，不改鉴权语义：
 //   - user / obo / uk 三类真人语义主体 → 复用现有 checkChannelAccess / buildAllowlist，
 //     仅主体 uid 由 principal.SubjectUID() 提供（obo=grantor、uk=key UID）。
-//   - as-bot 分支是 #C/#D（canReadChannel）与 #E（enumerateReadableChannels）的接线点，
-//     本层 fail-closed 占位（#B 之前无 bot 路由，不影响现网）。
+//   - as-bot 分支是 #C/#D（canReadChannel）与 #E（enumerateReadableChannels）的接线点。
+//     #D（YUJ-51）已接线群/子区单频道门（复用 ExistMemberActive，主体=botUID）；DM 门是
+//     #C 的接线点，仍 fail-closed 占位。enumerateReadableChannels 的 as-bot 枚举是 #E。
 
 // errBotPredicateNotImplemented as-bot 可读谓词尚未接线（#C/#D/#E）。
 var errBotPredicateNotImplemented = errors.New("messages_search: as-bot readable predicate not implemented (YUJ-50/51/52)")
@@ -63,17 +64,48 @@ func principalForSubject(c *wkhttp.Context, uid, spaceID string) Principal {
 	return userPrincipal{uid: uid, spaceID: spaceID}
 }
 
-// botCanReadChannel 是 as-bot 单频道门的接线点（#C/#D）。bot 谓词 =
-// IsFriend(botUID, peer) 的 DM ∪ ExistMemberActive(group, botUID) 的群/子区，
-// 且跳过 Space 段与全部 P2P blacklist。本层 fail-closed 占位：渲染 NOT_FOUND
-//（反枚举，与真人拒绝一致）。#B 接线 bot 路由前不会触达此分支。
+// botCanReadChannel 是 as-bot 单频道门（决策九），按 channelType 分支：
+//
+//   - 群（#D / YUJ-51）：checkGroupAccess(c, groupNo, botUID)。as-bot 群门与真人群门
+//     完全同源——都落在 ExistMemberActive(groupNo, botUID)：bot 有自己的 group_member 行
+//     （发消息路径 bot_api/send.go:394-404 已在用），status=Normal 天然排除被移出 / 被群
+//     拉黑的 bot；#354 的 group/bot_cascade.go expandBlacklistTargetsWithOwnedBots 让
+//     「拉黑用户连带拉黑其在群 bot」→ 被拉黑者的 bot status!=Normal → 天然搜不到该群，
+//     群级黑名单白拿，无需在此另写一套规则。
+//   - 子区（#D / YUJ-51）：checkThreadAccess(c, channelID, botUID)。子区继承父群成员身份
+//     ——门即 ExistMemberActive(parentGroupNo, botUID)，与群门同一谓词；bot 无子区免打扰
+//     设置，GetThread 的 mute 查询仅返回空，不参与放行判定。
+//   - DM（#C / YUJ-50）：as-bot P2P 门 = IsFriend(botUID, peer) 双向为真则放行，跳过 Space
+//     段与全部 P2P blacklist。本分支暂为 fail-closed 占位，由 #C 接线（#B 接线 bot 路由前
+//     不会触达）。
+//
+// 归一化（决策九硬约束）：群/子区门是 ExistMemberActive 的单点求值，与 #E buildBotAllowlist
+// 的 ExistMembersActive 枚举严格同源——保证「单频道门放行 ⇔ 出现在 global allowlist」
+//（#G 跨路一致性）。所有拒绝渲染 NOT_FOUND/resource=channel（反枚举，与真人拒绝一致），
+// DB 错由 checkGroupAccess / checkThreadAccess 内部 fail-closed。
 func (h *Handler) botCanReadChannel(c *wkhttp.Context, p Principal, channelType uint8, channelID string) bool {
-	h.Warn("messages_search: as-bot channel gate not yet implemented (YUJ-50/51); denying fail-closed",
-		zap.String("bot_uid", p.SubjectUID()),
-		zap.Uint8("channel_type", channelType),
-		zap.String("channel_id", channelID))
-	respondNotFound(c, "channel")
-	return false
+	botUID := p.SubjectUID()
+	switch channelType {
+	case channelTypeGroup:
+		return h.checkGroupAccess(c, channelID, botUID)
+	case channelTypeThread:
+		return h.checkThreadAccess(c, channelID, botUID)
+	case channelTypePerson:
+		// #C（YUJ-50）的接线点：as-bot P2P 门尚未实现，fail-closed 占位。
+		h.Warn("messages_search: as-bot P2P gate not yet implemented (YUJ-50); denying fail-closed",
+			zap.String("bot_uid", botUID),
+			zap.String("channel_id", channelID))
+		respondNotFound(c, "channel")
+		return false
+	default:
+		// validate.go 已在入口拒绝未知 channel_type；此处 defense-in-depth 兜底。
+		h.Warn("messages_search: as-bot gate unexpected channel_type; denying fail-closed",
+			zap.String("bot_uid", botUID),
+			zap.Uint8("channel_type", channelType),
+			zap.String("channel_id", channelID))
+		respondNotFound(c, "channel")
+		return false
+	}
 }
 
 // botEnumerateReadableChannels 是 as-bot global allowlist 枚举的接线点（#E）。
