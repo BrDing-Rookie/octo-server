@@ -183,22 +183,27 @@ func (s *Service) getAgent(spaceID, userUID, botID string, requireAdded bool) (*
 	return out, nil
 }
 
-func (s *Service) ListAgents(spaceID, userUID string, beforeID int64, limit int) (*AgentPage, error) {
-	if limit <= 0 || limit > maxPageSize {
-		limit = defaultPageSize
-	}
-	q := s.ctx.DB().Select(
-		"a.id", "a.space_id", "a.user_uid", "a.bot_id", "u.name AS bot_name",
-		"IFNULL(a.group_no,'') AS group_no", "a.is_added", "a.container_state", "a.created_at", "a.updated_at",
-		"(SELECT COUNT(*) FROM ai_team_session ats2 JOIN thread t2 ON t2.short_id=ats2.short_id AND t2.group_no=a.group_no WHERE ats2.agent_id=a.id AND ats2.state=2 AND t2.status<>3) AS session_count",
-	).From(dbr.I("ai_team_agent").As("a")).
+func (s *Service) eligibleAgentsQuery(spaceID, userUID string, columns ...string) *dbr.SelectStmt {
+	return s.ctx.DB().Select(columns...).
+		From(dbr.I("ai_team_agent").As("a")).
 		Join(dbr.I("robot").As("r"), "r.robot_id=a.bot_id COLLATE utf8mb4_0900_ai_ci AND r.status=1 AND r.creator_uid=a.user_uid COLLATE utf8mb4_0900_ai_ci").
 		Join(dbr.I("user").As("u"), "u.uid=a.bot_id COLLATE utf8mb4_0900_ai_ci AND u.status=1 AND u.is_destroy<>2").
 		Join(dbr.I("space").As("sp"), "sp.space_id=a.space_id COLLATE utf8mb4_0900_ai_ci AND sp.status=1").
 		Join(dbr.I("space_member").As("human_sm"), "human_sm.space_id=a.space_id COLLATE utf8mb4_0900_ai_ci AND human_sm.uid=a.user_uid COLLATE utf8mb4_0900_ai_ci AND human_sm.status=1").
 		Join(dbr.I("space_member").As("bot_sm"), "bot_sm.space_id=a.space_id COLLATE utf8mb4_0900_ai_ci AND bot_sm.uid=a.bot_id COLLATE utf8mb4_0900_ai_ci AND bot_sm.status=1").
-		Where("a.space_id=? AND a.user_uid=? AND a.is_added=1", spaceID, userUID).
-		OrderDesc("a.id").Limit(uint64(limit + 1))
+		Where("a.space_id=? AND a.user_uid=? AND a.is_added=1", spaceID, userUID)
+}
+
+func (s *Service) ListAgents(spaceID, userUID string, beforeID int64, limit int) (*AgentPage, error) {
+	if limit <= 0 || limit > maxPageSize {
+		limit = defaultPageSize
+	}
+	q := s.eligibleAgentsQuery(spaceID, userUID,
+		"a.id", "a.space_id", "a.user_uid", "a.bot_id", "u.name AS bot_name",
+		"IFNULL(a.group_no,'') AS group_no", "a.is_added", "a.container_state", "a.created_at", "a.updated_at",
+		fmt.Sprintf("%s AS agent_group", agentGroupSQL),
+		"(SELECT COUNT(*) FROM ai_team_session ats2 JOIN thread t2 ON t2.short_id=ats2.short_id AND t2.group_no=a.group_no WHERE ats2.agent_id=a.id AND ats2.state=2 AND t2.status<>3) AS session_count",
+	).OrderDesc("a.id").Limit(uint64(limit + 1))
 	if beforeID > 0 {
 		q = q.Where("a.id<?", beforeID)
 	}
@@ -207,10 +212,39 @@ func (s *Service) ListAgents(spaceID, userUID string, beforeID int64, limit int)
 	if err != nil {
 		return nil, err
 	}
-	page := &AgentPage{Items: rows}
+	groupCounts := make([]struct {
+		Type  AgentGroupType `db:"agent_group"`
+		Count int64          `db:"agent_count"`
+	}, 0, 2)
+	_, err = s.eligibleAgentsQuery(spaceID, userUID,
+		fmt.Sprintf("%s AS agent_group", agentGroupSQL),
+		"COUNT(*) AS agent_count",
+	).GroupBy(agentGroupSQL).Load(&groupCounts)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[AgentGroupType]int64{
+		AgentGroupTypeCloudClone:        0,
+		AgentGroupTypePersonalAssistant: 0,
+	}
+	for _, groupCount := range groupCounts {
+		counts[groupCount.Type] = groupCount.Count
+	}
+	page := &AgentPage{Groups: []*AgentGroup{
+		{Type: AgentGroupTypeCloudClone, Count: counts[AgentGroupTypeCloudClone], Items: make([]*Agent, 0)},
+		{Type: AgentGroupTypePersonalAssistant, Count: counts[AgentGroupTypePersonalAssistant], Items: make([]*Agent, 0)},
+		{Type: AgentGroupTypeDigitalEmployee, Count: 0, Items: make([]*Agent, 0)},
+	}}
 	if len(rows) > limit {
-		page.Items = rows[:limit]
+		rows = rows[:limit]
 		page.NextCursor = fmt.Sprintf("%d", rows[limit-1].ID)
+	}
+	for _, agent := range rows {
+		if agent.GroupType == AgentGroupTypeCloudClone {
+			page.Groups[0].Items = append(page.Groups[0].Items, agent)
+			continue
+		}
+		page.Groups[1].Items = append(page.Groups[1].Items, agent)
 	}
 	return page, nil
 }
