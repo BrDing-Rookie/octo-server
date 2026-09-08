@@ -24,6 +24,30 @@ other = "Authentication is required."
 ["err.server.agent_mail_gateway.unavailable"]
 other = "Agent Mail is temporarily unavailable."
 
+["err.server.ai_team.container_protected"]
+other = "This AI session container cannot be changed through group APIs."
+
+["err.server.ai_team.disabled"]
+other = "The AI team feature has been disabled by the administrator."
+
+["err.server.ai_team.forbidden"]
+other = "You do not have permission to use this AI in the current space."
+
+["err.server.ai_team.idempotency_conflict"]
+other = "The idempotency key was already used for a different request."
+
+["err.server.ai_team.im_unavailable"]
+other = "The AI session is not ready. Please retry."
+
+["err.server.ai_team.not_found"]
+other = "AI team resource not found."
+
+["err.server.ai_team.request_invalid"]
+other = "Invalid AI team request."
+
+["err.server.ai_team.store_failed"]
+other = "Failed to save AI team data."
+
 ["err.server.app_bot.id_conflict"]
 other = "The bot id is already in use."
 
@@ -392,6 +416,9 @@ other = "The authorization code is invalid or has expired."
 
 ["err.server.group.auth_code_user_mismatch"]
 other = "The authorization code does not match the current user."
+
+["err.server.group.bot_cannot_be_owner"]
+other = "Group ownership cannot be transferred to a bot."
 
 ["err.server.group.bot_not_in_space"]
 other = "This bot does not belong to your space."

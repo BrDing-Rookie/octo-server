@@ -2,6 +2,7 @@ package group
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	aiteampkg "github.com/Mininglamp-OSS/octo-server/pkg/aiteam"
 	"github.com/Mininglamp-OSS/octo-server/pkg/botevent"
 	"github.com/Mininglamp-OSS/octo-server/pkg/pushcache"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
@@ -107,6 +109,14 @@ type IService interface {
 	ActiveMemberGroupNos(uid string) ([]string, error)
 	// GetGroupsWithMemberUID 获取某个用户的所有群
 	GetGroupsWithMemberUID(uid string) ([]*InfoResp, error)
+	// GetGroupsWithMemberUIDForLifecycleCleanup returns every active membership,
+	// including server-managed containers hidden from product-facing lists.
+	GetGroupsWithMemberUIDForLifecycleCleanup(uid string) ([]*InfoResp, error)
+	// RemoveUserFromGroupsForLifecycleCleanup removes a deprovisioned account
+	// from every active group, including hidden server-managed containers.
+	// Product-facing deletion routes must use this single entry point so a new
+	// account lifecycle path cannot accidentally strand protected membership.
+	RemoveUserFromGroupsForLifecycleCleanup(uid string) error
 	// 获取指定群的群成员的最大数据版本
 	GetGroupMemberMaxVersion(groupNo string) (int64, error)
 	// 获取用户所有超级群信息
@@ -229,6 +239,71 @@ func (s *Service) AddGroup(model *AddGroupReq) error {
 
 func (s *Service) GetGroupsWithMemberUID(uid string) ([]*InfoResp, error) {
 	groups, err := s.db.queryGroupsWithMemberUID(uid)
+	return groupModelsToInfo(groups, err)
+}
+
+func (s *Service) GetGroupsWithMemberUIDForLifecycleCleanup(uid string) ([]*InfoResp, error) {
+	groups, err := s.db.queryAllGroupsWithMemberUID(uid)
+	return groupModelsToInfo(groups, err)
+}
+
+// RemoveUserFromGroupsForLifecycleCleanup is the authoritative account-teardown
+// path for group membership. It deliberately sees AI containers that ordinary
+// product lists hide, and only enables protected removal for rows whose persisted
+// purpose proves they are lifecycle-managed containers. Creator memberships are
+// reported and skipped: RemoveGroupMembers intentionally cannot remove a creator,
+// and that outcome must not turn otherwise-convergent account teardown into a 500.
+func (s *Service) RemoveUserFromGroupsForLifecycleCleanup(uid string) error {
+	groups, err := s.GetGroupsWithMemberUIDForLifecycleCleanup(uid)
+	if err != nil {
+		return fmt.Errorf("query lifecycle groups for %s: %w", uid, err)
+	}
+
+	var cleanupErrs []error
+	for _, group := range groups {
+		// Disbanded groups retain member rows by existing lifecycle semantics.
+		if group.Status == GroupStatusDisband {
+			continue
+		}
+		if group.Creator == uid {
+			s.Warn("生命周期清理跳过群主成员",
+				zap.String("uid", uid), zap.String("group_no", group.GroupNo))
+			continue
+		}
+		result, removeErr := s.RemoveGroupMembers(&RemoveGroupMembersServiceReq{
+			GroupNo:              group.GroupNo,
+			Members:              []string{uid},
+			OperatorUID:          uid,
+			SuppressRemoveNotice: true,
+			AllowProtected:       group.Purpose == aiteampkg.GroupPurpose,
+		})
+		if removeErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove %s from group %s: %w", uid, group.GroupNo, removeErr))
+			continue
+		}
+		if result == nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove %s from group %s: empty cleanup result", uid, group.GroupNo))
+			continue
+		}
+		removed := false
+		for _, removedUID := range result.RemovedUIDs {
+			if removedUID == uid {
+				removed = true
+				break
+			}
+		}
+		if !removed {
+			// A concurrent ownership transfer may promote the target after the
+			// lifecycle lookup. RemoveGroupMembers deliberately skips creators;
+			// preserve that non-fatal contract and leave an operator-visible trace.
+			s.Warn("生命周期清理未移除成员（可能已成为群主）",
+				zap.String("uid", uid), zap.String("group_no", group.GroupNo))
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func groupModelsToInfo(groups []*Model, err error) ([]*InfoResp, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -718,6 +793,7 @@ type AddGroupReq struct {
 // InfoResp 群信息
 type InfoResp struct {
 	GroupNo             string    `json:"group_no"`               // 群编号
+	Purpose             string    `json:"purpose,omitempty"`      // 服务端管理用途
 	GroupType           GroupType `json:"group_type"`             // 群类型
 	Name                string    `json:"name"`                   // 群名称
 	Notice              string    `json:"notice"`                 // 群公告
@@ -739,6 +815,7 @@ type InfoResp struct {
 func toInfoResp(m *Model) *InfoResp {
 	return &InfoResp{
 		GroupNo:             m.GroupNo,
+		Purpose:             m.Purpose,
 		GroupType:           GroupType(m.GroupType),
 		Name:                m.Name,
 		Notice:              m.Notice,
@@ -827,6 +904,7 @@ func toSettingResp(m *Setting) *SettingResp {
 
 type GroupResp struct {
 	GroupNo                  string    `json:"group_no"`                    // 群编号
+	Purpose                  string    `json:"purpose,omitempty"`           // 服务端管理用途
 	GroupType                GroupType `json:"group_type"`                  // 群类型
 	Category                 string    `json:"category"`                    // 群分类
 	Name                     string    `json:"name"`                        // 群名称
@@ -875,6 +953,7 @@ type GroupResp struct {
 func (g *GroupResp) from(model *DetailModel) *GroupResp {
 	resp := &GroupResp{
 		GroupNo:                  model.GroupNo,
+		Purpose:                  model.Purpose,
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
@@ -921,6 +1000,7 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 func (g *GroupResp) fromModel(model *Model) *GroupResp {
 	resp := &GroupResp{
 		GroupNo:                  model.GroupNo,
+		Purpose:                  model.Purpose,
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
@@ -1061,6 +1141,10 @@ type RemoveGroupMembersServiceReq struct {
 	// N×M 条堆给最后一个人看）。普通移除和自愿退出都**应该**发——群成员看见 bot
 	// 凭空消失，有权知道原因，这与「谁移出了谁」是两件事。
 	SuppressBotCascadeTip bool
+
+	// AllowProtected is reserved for authoritative lifecycle cleanup (Space
+	// removal/disband). User and Bot API callers must leave it false.
+	AllowProtected bool
 }
 
 // RemoveGroupMembersServiceResp 移除群成员响应。
@@ -1434,6 +1518,11 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 	if len(req.Members) == 0 {
 		return nil, errors.New("members is required")
 	}
+	if protected, err := aiteampkg.IsProtectedGroup(s.ctx.DB(), req.GroupNo); err != nil {
+		return nil, err
+	} else if protected {
+		return nil, aiteampkg.ErrContainerProtected
+	}
 
 	// 链路耗时定位（邀请成员入群慢排查）：startedAt 覆盖整条 AddGroupMembers，
 	// 配合事务提交点与各 WuKongIM 调用的分段计时，区分 DB 阶段 vs IM 阶段。
@@ -1743,6 +1832,13 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 	}
 	if len(req.Members) == 0 {
 		return nil, errors.New("members is required")
+	}
+	if !req.AllowProtected {
+		if protected, err := aiteampkg.IsProtectedGroup(s.ctx.DB(), req.GroupNo); err != nil {
+			return nil, err
+		} else if protected {
+			return nil, aiteampkg.ErrContainerProtected
+		}
 	}
 
 	// 群存在性检查

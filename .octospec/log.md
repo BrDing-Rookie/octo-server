@@ -2402,6 +2402,50 @@ SQL 注释里一个撇号破坏了它的朴素语句分割；P0 的游标覆盖�
 - **Assertions one level weaker than their own comments** — four of them, all
   cheap to strengthen, all on the path where the next regression would land.
 
+## 2026-09-07 — my-ai-team-sessions
+
+- Added a feature-gated personal AI API backed by one owner/Bot parent group and
+  idempotently provisioned thread sessions, with server-authoritative Bot routing.
+- Protected the two-member container invariant across ordinary group, manager,
+  thread and Bot mutation paths; Space lifecycle cleanup remains authoritative.
+- Filtered both parent group and type-5 topic channel shapes from normal recent,
+  follow, group and Bot group lists. The durable discriminator is the new
+  server-owned `group.purpose`, not the transport-facing `group_type`.
+- Disabled global thread auto-archive through an authoritative DB setting; a fresh
+  migration query returned `thread / auto_archive_enabled / 0`.
+- Build, unit, four E2E/API shards, focused regression, i18n, vet and direct
+  WuKongIM persistence passed. Full pilote2e retains an unrelated baseline
+  card-template catalog fixture failure.
+
+## 2026-09-07 — my-ai-team-sessions (upstream-main integration)
+
+- Merged open-source `main` at `96b3b926` and resolved the Space preset-group and
+  zh-CN catalog conflicts without dropping either side's behavior.
+- Integrated AI container initialization with #846's single group-member admission
+  funnel; its source guard now passes without allowlisting a direct table write.
+- Re-ran build, vet, 52 unit packages, all four MySQL/Redis/WuKongIM E2E/API shards,
+  i18n checks and the direct WuKongIM persistence test successfully.
+
+## 2026-09-07 — my-ai-team-sessions (final review hardening)
+
+- Preserved legacy-index use across mixed collations and added a production-shape
+  query-plan regression.
+- Closed org-sync membership mutation and Space-cleanup rejoin gaps for AI
+  containers, including parent/thread WuKongIM subscriber reconciliation.
+- Added a lifecycle-only group lookup so User Bot deletion cannot strand a hidden
+  AI-container membership or its WuKongIM subscription.
+- Hardened provisioning state transitions and session rename lock ordering.
+- Re-ran build, vet, unit, all four API/E2E shards, i18n and focused WuKongIM gates.
+
+## 2026-09-08 — my-ai-team-sessions (review convergence)
+
+- Centralized Bot group-membership teardown and applied it to command, User API,
+  and super-admin deletion paths so hidden AI containers cannot be stranded.
+- Guarded org-exit and category paths, filtered category reads, and excluded AI
+  session threads from automatic archival without overwriting global operator
+  settings during migration.
+- Added DB-backed regressions and passed all affected module suites, build, vet,
+  i18n extraction/lint, and diff checks on the isolated task test stack.
 ## 2026-09-07 — project-p2-subsystem-integration（PR #850 第七轮 review：两个阻塞项）
 
 - **权限的作用域比它能代表的状态更宽** —— 两个阻塞项是同一个形状。一个进程级布尔门住
@@ -2491,3 +2535,20 @@ SQL 注释里一个撇号破坏了它的朴素语句分割；P0 的游标覆盖�
   实测走通的等价物：`DROP TABLE` 与删 `gorp_migrations` 账本行**放在同一事务**。
 - **不实的功效声称会让下一个人跳过验证** —— 详见当日前一条与 journal。
 
+## 2026-09-08 — my-ai-team-sessions（PR #848 CI 异步测试收敛）
+
+- **认领不是完成** —— `space_member_removal_cleanup.attempts` 在 worker 认领工单时就自增，早于任何
+  cleanup callback。测试等待 `attempts >= 1` 后立即断言 callback 次数，会在新增的生命周期清理拉长窗口后
+  稳定暴露竞态；而 callback 对普通 `int` 的跨 goroutine 读写本身也没有同步保证。
+- 测试改用原子计数确认失败步骤确实执行，并等待 worker 跑完所有步骤后才写入的 `last_error`，再检查群成员
+  删除结果。目标用例及完整 `modules/project` 包均在 `-race` 与 shuffle 下通过。
+
+## 2026-09-08 — my-ai-team-sessions（PR #848 最终 blocker 收敛）
+
+- 超管删除 Bot 先验证 robot 实体，再进入破坏性的群成员清理，错误的人类 UID 不再触发级联删除。
+- 生命周期清理把群主不可删除视为带告警的预期 no-op，并禁止以后把普通群群主转让给 Bot。
+- mention preference、Bot target resolve 与管理端群列表均隐藏/拒绝 AI 容器；resolve 同时过滤其 thread。
+- 新增 DB/HTTP 回归，完整 `group`、`robot`、`bot_api` 包以及 build、vet、i18n、diff 门禁通过。
+- 继续关闭第六轮发现的路由族缺口：四组 incoming-webhook 管理挂载统一在成员鉴权后拒绝
+  AI 容器；旧版最近会话和运营看板也不再展示容器、thread 或成员明细。
+- 完整 `incomingwebhook`、`message`、`opanalytics` 套件通过。
